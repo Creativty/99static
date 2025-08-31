@@ -1,3 +1,3 @@
-<!-- gsx: core::define methods::upper [] [] -->
-<!-- gsx: core::define methods::upper [x] if x in 'a'..='z' expr [else expr] -->
-<!-- gsx: core::define methods::upper [x:xs] concat upper x upper xs -->
+<!-- gsx: core::define! methods::upper [] = [] -->
+<!-- gsx: core::define! methods::upper [x] = core::if! x in 'a'..='z' core::char! + core::int! x 32 core::else! x -->
+<!-- gsx: core::define! methods::upper [x:xs] = core::concat! upper! x upper! xs -->
