@@ -1,4 +1,5 @@
 <!-- gsx: core::include! "methods.gsx" -->
+<!-- gsx: core::print! -->
 
 <html>
 	<head>

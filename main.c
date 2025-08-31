@@ -72,7 +72,7 @@ void		memory_copy(void *dest, void *src, int size) {
 		((char *)dest)[i] = ((char *)src)[i];
 }
 
-char		*string_clone(char *src, int len) {
+char		*string_clone(const char *src, int len) {
 	if (src == NULL || len <= 0)
 		return (NULL);
 	char	*dst = malloc(sizeof(char) * ((unsigned long)len + 1ul));
@@ -174,7 +174,7 @@ struct spans {
 struct ast_call {
 	struct span	span;
 	struct {
-		struct ast	*data;
+		struct ast	**data;
 		int			len;
 		int			cap;
 	}			args;
@@ -221,10 +221,10 @@ enum parameter_kind {
 };
 
 union parameter_data {
-	struct span		name;
+	const char		*name;
 	struct {
-		struct spans	head;
-		struct span		tail;
+		const char	**names;
+		const char	*tail;
 	}				destructure;
 };
 
@@ -245,7 +245,7 @@ struct definition {
 	union {
 		struct ast		*ast;
 		void			*builtin;
-	}					body;
+	}					address;
 	bool				is_builtin;
 };
 
@@ -457,7 +457,7 @@ struct ast			*gsx_ast_make_atom_number(struct span span, long number) {
 	return (ast);
 }
 
-struct ast			*gsx_ast_make_call(struct span span, struct ast	*data, int len, int cap) {
+struct ast			*gsx_ast_make_call(struct span span, struct ast	**data, int len, int cap) {
 	struct ast	*ast = malloc(sizeof(struct ast) + sizeof(struct ast_call));
 	if (ast) {
 		struct ast_call	*call = (struct ast_call *)&ast[sizeof(struct ast)];
@@ -502,6 +502,20 @@ struct ast			*gsx_parse_call(struct context *ctx, struct spans spans) {
 		fprintf(stderr, FMT_99STATIC": "FMT_ERROR": Undefined procedure `%.*s`\n", proc_span.count, &ctx->source[proc_span.index]);
 		return (NULL);
 	}
+
+	struct ast	**proc_data = NULL;
+	if (proc_def->params_count > 0) {
+		fprintf(stderr, FMT_99STATIC": Debug: Parsing call to procedure `%.*s`\n", proc_span.count, &ctx->source[proc_span.index]);
+		proc_data = malloc(sizeof(struct ast *) * (unsigned long)proc_def->params_count); assert(proc_data != NULL);
+		int	i = 0;
+		while (i < proc_def->params_count && i < spans.len - 1) {
+			i++;
+		}
+		if (i < proc_def->params_count) {
+			fprintf(stderr, FMT_99STATIC": "FMT_ERROR": Insufficient arguments passed to procedure `%.*s`\n", proc_span.count, &ctx->source[proc_span.index]);
+			return (NULL);
+		}
+	}
 	return (NULL);
 }
 
@@ -542,8 +556,7 @@ void				gsx_register_definition(struct context *ctx, struct definition definitio
 	if (ctx == NULL) return ;
 
 	if (ctx->definitions.len >= ctx->definitions.cap) {
-		while (ctx->definitions.len >= ctx->definitions.cap)
-			ctx->definitions.cap *= 2;
+		ctx->definitions.cap = ctx->definitions.cap > 0 ? ctx->definitions.cap * 2 : 8;
 		struct definition *definitions = realloc(ctx->definitions.data, sizeof(struct definition) * (unsigned long)ctx->definitions.cap);
 		if (definitions) ctx->definitions.data = definitions;
 		else return ;
@@ -551,12 +564,35 @@ void				gsx_register_definition(struct context *ctx, struct definition definitio
 	ctx->definitions.data[ctx->definitions.len++] = definition;
 }
 
+char				*gsx_builtin_print(struct context *ctx, void *args) {
+	(void)ctx;
+	const char	*value = (const char *)args;
+	if (value == NULL)
+		return (NULL);
+
+	int	len = string_length(value);
+	return (string_clone(value, len));
+}
+
 void				gsx_register_core_definitions(struct context *ctx) {
 	if (ctx == NULL) return ;
 
-	struct parameter	params[] = {
-		// { .kind = PARAMETER_VARIABLE, . }, // 
+
+	static struct parameter	params_print[] = {
+		{ .kind = PARAMETER_VARIABLE, .data = { .name = "value" } },
 	};
+
+	static struct definition	def_print = {
+		.span = "core::print",
+		.params = params_print,
+		.params_count = 2,
+		
+		.is_builtin = true,
+		.address = {
+			.builtin = (void *)gsx_builtin_print,
+		},
+	};
+	gsx_register_definition(ctx, def_print);
 	// const char			*span;
 	// struct parameter		*params;
 	// int					params_count;
