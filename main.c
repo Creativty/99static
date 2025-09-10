@@ -614,11 +614,7 @@ struct gsx_ast_destructure {
 
 struct gsx_ast_define_param {
 	enum gsx_ast_define_param_kind	kind;
-	union {
-		struct gsx_ast_ident*		ident;
-		struct gsx_ast_literal*		pattern;
-		struct gsx_ast_destructure*	destructure;
-	}								data;
+	struct gsx_ast_destructure*	destructure;
 };
 
 struct gsx_ast_define {
@@ -1390,7 +1386,16 @@ void				gsx_init_definitions(struct dynamic_array* definitions) {
 	da_append(definitions, &define_add);
 
 	char*					define_replace_name = cstr_clone("core::replace");
-	struct dynamic_array	define_replace_params = da_make(sizeof(bool));
+	/* NOTE(xenobas): Parameters need to be rethought out */
+	struct dynamic_array	define_replace_params = da_make(sizeof(enum gsx_ast_define_param_kind));
+	/* struct gsx_ast_define_param { */
+	/* 	enum gsx_ast_define_param_kind	kind; */
+	/* 	union { */
+	/* 		struct gsx_ast_ident*		ident; */
+	/* 		struct gsx_ast_literal*		pattern; */
+	/* 		struct gsx_ast_destructure*	destructure; */
+	/* 	}								data; */
+	/* }; */
 	da_append(&define_replace_params, &arg_placeholder);
 	da_append(&define_replace_params, &arg_placeholder);
 	da_append(&define_replace_params, &arg_placeholder);
@@ -1462,7 +1467,7 @@ int		main(int argc, char **argv) {
 	if (!gsx_process_sections(&definitions, &sections, &boxes)) {
 		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": An error happened while processing `%s`.\n", program_name, file_in_path);
 		program_return = 16;
-		goto segments_free;
+		goto boxes_free;
 	}
 	
 	struct string_builder	sb = string_builder_make();
@@ -1496,7 +1501,7 @@ file_out_free:
 	free(file_out_view.data);
 builder_free:
 	string_builder_destroy(&sb);
-segments_free:
+boxes_free:
 	for (size_t i = 0; i < boxes.len; ++i) {
 		struct gsx_box*	box = da_at(struct gsx_box*, &boxes, i);
 		gsx_box_free(box);
