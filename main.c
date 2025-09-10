@@ -1,6 +1,8 @@
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <limits.h>
+#include <string.h>
 #include <unistd.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -1016,7 +1018,7 @@ struct gsx_ast*		gsx_ast_parse_call(struct gsx_parser* parser) {
 			node = gsx_ast_parse_call(parser);
 		} else if (token.kind == GSX_TOKEN_IDENT) {
 			node = gsx_ast_parse_ident(parser);
-		} else if (token.kind == GSX_TOKEN_INTEGER | token.kind == GSX_TOKEN_STRING) {
+		} else if (token.kind == GSX_TOKEN_INTEGER || token.kind == GSX_TOKEN_STRING) {
 			node = gsx_ast_parse_literal(parser);
 		} else {
 			if (!gsx_parser_expect_any(parser, arg_kinds, arg_kinds_count)) break ;
@@ -1054,13 +1056,10 @@ struct gsx_ast*		gsx_ast_parse_call(struct gsx_parser* parser) {
 }
 
 struct gsx_ast*		gsx_ast_parse(const struct dynamic_array* definitions, const struct dynamic_array* tokens) {
-	struct gsx_parser	parser = {
-		.definitions = definitions,
-		.tokens = tokens,
-		.current = { 0 },
-		.index = 0ul,
-		.ok = true
-	};
+	struct gsx_parser	parser = { 0 };
+	parser.ok = true;
+	parser.tokens = tokens;
+	parser.definitions = definitions;
 
 	struct gsx_ast*		ast = NULL;
 	struct gsx_token	token = gsx_parser_peek(&parser);
@@ -1491,7 +1490,8 @@ int		main(int argc, char **argv) {
 	}
 	if (!os_file_dump(file_out_path, file_out_view)) {
 		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": An error happened while generating output file content `%s`.\n", program_name, file_out_path);
-		fprintf(stderr, "\tDescription: %m\n");
+		const char *errno_text = strerror(errno);
+		fprintf(stderr, "\tDescription: %s\n", errno_text);
 		program_return = 32;
 		goto file_out_free;
 	}
