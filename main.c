@@ -422,6 +422,14 @@ int	fprintf_gsx_token_kind(FILE* file, enum gsx_token_kind kind) {
 	}
 }
 
+bool	gsx_token_is_expression(enum gsx_token_kind kind) {
+	if (kind == GSX_TOKEN_CALL) return (true);
+	if (kind == GSX_TOKEN_STRING) return (true);
+	if (kind == GSX_TOKEN_INTEGER) return (true);
+	if (kind == GSX_TOKEN_IDENT) return (true);
+	return (false);
+}
+
 struct gsx_token {
 	struct sview		text;
 	enum gsx_token_kind	kind;
@@ -544,8 +552,6 @@ bool				gsx_lexer_tokenize(struct sview text, struct dynamic_array* tokens) {
 				if (!gsx_is_ident_infix(gsx_lexer_peek(&lexer))) break ;
 				letter = gsx_lexer_next(&lexer);
 			}
-			struct sview		text = gsx_lexer_peek_view(&lexer);
-
 			enum gsx_token_kind	kind = GSX_TOKEN_IDENT;
 			if (letter == '!')
 				kind = GSX_TOKEN_CALL;
@@ -620,6 +626,12 @@ struct gsx_ast {
 	}					data;
 };
 
+#ifdef DEBUG_AST_CALLS
+#define fprintf_ast_call(NAME, TOKEN) fprintf(stdout, NAME " :: `%.*s`\n", (int)((TOKEN).text.len), (TOKEN).text.data);
+#else
+#define fprintf_ast_call(NAME, TOKEN) ((void)(NAME), (void)(TOKEN))
+#endif
+
 void				gsx_ast_print(FILE* file, struct gsx_ast *node, int indent) {
 	if (node == NULL) return ;
 
@@ -679,6 +691,13 @@ void				gsx_ast_free(struct gsx_ast* node) {
 	free(node);
 }
 
+bool				gsx_ast_is_value_void(struct gsx_ast* ast) {
+	if (ast != NULL && ast->kind == GSX_AST_CALL) return (false);
+	if (ast != NULL && ast->kind == GSX_AST_IDENT) return (false);
+	if (ast != NULL && ast->kind == GSX_AST_LITERAL) return (false);
+	return (true);
+}
+
 enum gsx_definition_kind {
 	GSX_DEFINITION_INVALID,
 
@@ -692,8 +711,7 @@ struct gsx_definition {
 	struct dynamic_array		params;
 	enum gsx_definition_kind	kind;
 	union {
-		char*				variable;
-		struct ast*			function;
+		struct gsx_ast*		ast;
 		void*				internal;
 	}						data;
 };
@@ -792,6 +810,7 @@ size_t				gsx_parser_remaining(struct gsx_parser* parser) {
 struct gsx_ast*		gsx_ast_parse_ident(struct gsx_parser* parser) {
 	if (!gsx_parser_expect(parser, GSX_TOKEN_IDENT)) return (NULL);
 	struct gsx_token		name = parser->current;
+	fprintf_ast_call("gsx_ast_parse_ident", name);
 	struct gsx_ast*			node = malloc(sizeof(struct gsx_ast) + sizeof(struct gsx_ast_ident));
 	struct gsx_ast_ident*	ident = (struct gsx_ast_ident*)&((char *)node)[sizeof(struct gsx_ast)];
 	if (node != NULL) {
@@ -807,6 +826,7 @@ struct gsx_ast*		gsx_ast_parse_literal(struct gsx_parser* parser) {
 	const size_t				lit_kinds_count = sizeof(lit_kinds) / sizeof(lit_kinds[0]);
 	if (!gsx_parser_expect_any(parser, lit_kinds, lit_kinds_count)) return (NULL);
 	struct gsx_token		token = parser->current;
+	fprintf_ast_call("gsx_ast_parse_literal", token);
 	// fprintf(stderr, "gsx_ast_parse_literal :: `%.*s`\n", (int)token.text.len, token.text.data);
 	struct gsx_ast*			node = malloc(sizeof(struct gsx_ast) + sizeof(struct gsx_ast_literal));
 	struct gsx_ast_literal*	literal = (struct gsx_ast_literal*)&((char *)node)[sizeof(struct gsx_ast)];
@@ -835,6 +855,7 @@ struct gsx_ast*		gsx_ast_parse_define_param(struct gsx_parser* parser) {
 	const size_t				define_param_kinds_count = sizeof(define_param_kinds) / sizeof(define_param_kinds[0]);
 	if (!gsx_parser_expect_any(parser, define_param_kinds, define_param_kinds_count)) return (NULL);
 	struct gsx_token		token = parser->current;
+	fprintf_ast_call("gsx_ast_parse_define_param", token);
 	if (token.kind == GSX_TOKEN_CALL) { // Value
 	}
 	return (NULL);
@@ -845,6 +866,8 @@ struct gsx_ast*		gsx_ast_parse_define(struct gsx_parser* parser, struct gsx_defi
 
 	struct gsx_token					token = parser->current;
 	if (token.kind != GSX_TOKEN_CALL) return (NULL);
+	fprintf(stdout, "gsx_ast_parse_define :: `%.*s`\n", (int)token.text.len, token.text.data);
+	fprintf_ast_call("gsx_ast_parse_define", token);
 	struct sview						text = sview_take(token.text, token.text.len - 1ul);
 	if (!sview_equals_cstr(text, "core::define")) return (NULL);
 	if (!gsx_parser_expect(parser, GSX_TOKEN_IDENT)) return (NULL);
@@ -867,6 +890,7 @@ struct gsx_ast*		gsx_ast_parse_call(struct gsx_parser* parser) {
 	if (!gsx_parser_expect(parser, GSX_TOKEN_CALL)) return (NULL);
 
 	struct gsx_token		name = parser->current;
+	fprintf_ast_call("gsx_ast_parse_call", name);
 	struct sview			text = sview_take(name.text, name.text.len - 1ul);
 	struct gsx_definition*	definition = gsx_definition_get(parser->definitions, text);
 	if (definition == NULL) {
@@ -932,12 +956,39 @@ struct gsx_ast*		gsx_ast_parse(const struct dynamic_array* definitions, const st
 		.ok = true
 	};
 
-	struct gsx_ast	*ast = gsx_ast_parse_call(&parser);
+	struct gsx_ast*		ast = NULL;
+	struct gsx_token	token = gsx_parser_peek(&parser);
+	fprintf_ast_call("gsx_ast_parse", token);
+	if (token.kind == GSX_TOKEN_STRING || token.kind == GSX_TOKEN_CHAR || token.kind == GSX_TOKEN_INTEGER)
+		ast = gsx_ast_parse_literal(&parser);
+	else if (token.kind == GSX_TOKEN_IDENT)
+		ast = gsx_ast_parse_ident(&parser);
+	else if (token.kind == GSX_TOKEN_CALL) {
+		ast = gsx_ast_parse_call(&parser);
+		if (ast != NULL && !gsx_parser_eof(&parser)) {
+			struct sview	name = ast->data.call->name.text;
+			fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Arguments overflow detected to function `%.*s`!\n", program_name, (int)name.len, name.data);
+			fprintf(stderr, "\t| overflowing arguments = [ ");
+			while (!gsx_parser_eof(&parser)) {
+				struct gsx_token	token = gsx_parser_next(&parser);
+				fprintf(stderr, "`%.*s`", (int)token.text.len, token.text.data);
+				if (!gsx_parser_eof(&parser))
+					fprintf(stderr, ", ");
+			}
+			fprintf(stderr, " ]\n");
+			return (gsx_ast_free(ast), parser.ok = false, NULL);
+		}
+	} else {
+		struct sview	name = token.text;
+		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Expected `expression`, got `%.*s` instead.\n", program_name, (int)name.len, name.data);
+		return (parser.ok = false, NULL);
+	}
+
 	if (ast == NULL) return (NULL);
 	else if (!gsx_parser_eof(&parser)) {
-		struct sview	name = ast->data.call->name.text;
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Arguments overflow detected to function `%.*s`!\n", program_name, (int)name.len, name.data);
-		fprintf(stderr, "\t| overflowing arguments = [ ");
+		struct sview	name = token.text;
+		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Multi value expression `%.*s` is not allowed!\n", program_name, (int)name.len, name.data);
+		fprintf(stderr, "\t| remaining tokens = [ ");
 		while (!gsx_parser_eof(&parser)) {
 			struct gsx_token	token = gsx_parser_next(&parser);
 			fprintf(stderr, "`%.*s`", (int)token.text.len, token.text.data);
@@ -949,9 +1000,41 @@ struct gsx_ast*		gsx_ast_parse(const struct dynamic_array* definitions, const st
 	} else return (ast);
 }
 
+char*				gsx_process_ast(const struct dynamic_array* definitions, struct gsx_ast* ast);
+
+char*				gsx_process_ast_literal(const struct dynamic_array* definitions, struct gsx_ast_literal* ast) {
+	// NOTE(xenobas): do I remove the argument definitions?
+	struct gsx_token	token = ast->token;
+	return ((void)definitions, cstr_clone_sview(token.text));
+}
+
+char*				gsx_process_ast_ident(const struct dynamic_array* definitions, struct gsx_ast_ident* ident) {
+	struct sview	text = ident->name.text;
+	struct gsx_definition*	definition = gsx_definition_get(definitions, text);
+	if (definition != NULL) return (gsx_process_ast(definitions, definition->data.ast));
+	else fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Could not process undeclared identifier `%.*s`!\n", program_name, (int)text.len, text.data);
+	return (NULL);
+}
+
+char*				gsx_process_ast_call(const struct dynamic_array* definitions, struct gsx_ast_call* ast) {
+	(void)definitions;
+	(void)ast;
+	return (cstr_clone("todo: gsx_process_ast_call"));
+}
+
+char*				gsx_process_ast_define(const struct dynamic_array* definitions, struct gsx_ast_define* ast) {
+	(void)definitions;
+	(void)ast;
+	return (cstr_clone("todo: gsx_process_ast_define"));
+}
+
 char*				gsx_process_ast(const struct dynamic_array* definitions, struct gsx_ast* ast) {
-	if (definitions == NULL || ast == NULL || ast->kind != GSX_AST_CALL) return (NULL);
-	return (cstr_clone(""));
+	if (definitions == NULL || ast == NULL || gsx_ast_is_value_void(ast)) return (NULL);
+	if (ast->kind == GSX_AST_LITERAL) return (gsx_process_ast_literal(definitions, ast->data.literal));
+	if (ast->kind == GSX_AST_IDENT) return (gsx_process_ast_ident(definitions, ast->data.ident));
+	if (ast->kind == GSX_AST_CALL) return (gsx_process_ast_call(definitions, ast->data.call));
+	if (ast->kind == GSX_AST_DEFINE) return (gsx_process_ast_define(definitions, ast->data.define));
+	return (NULL);
 }
 
 char*				gsx_process_expression(struct dynamic_array* definitions, struct sview comment) {
@@ -1001,12 +1084,11 @@ char*				gsx_process_expression(struct dynamic_array* definitions, struct sview 
 
 	struct gsx_ast*			syntax_tree = gsx_ast_parse(definitions, &tokens);
 	if (syntax_tree == NULL)
-		goto gsx_parse_expression_return;
+		goto gsx_process_expression_return;
 	production = gsx_process_ast(definitions, syntax_tree);
 	// gsx_ast_print(stdout, syntax_tree, 0);
-
-gsx_parse_expression_return:
 	gsx_ast_free(syntax_tree);
+
 gsx_process_expression_return:
 	da_free(&tokens);
 	return (production);
@@ -1047,6 +1129,29 @@ char*				gsx_internal_stub(void) {
 
 void				gsx_init_definitions(struct dynamic_array* definitions) {
 	bool	arg = true;
+
+	char*					define_title_name = cstr_clone("TITLE");
+	char*					define_title_val = cstr_clone("index.html");
+	struct gsx_ast*			define_title_ast = NULL;
+	{
+		struct gsx_ast*			node = malloc(sizeof(struct gsx_ast) + sizeof(struct gsx_ast_literal));
+		struct gsx_ast_literal*	literal = (struct gsx_ast_literal*)&((char *)node)[sizeof(struct gsx_ast)];
+		if (node != NULL) {
+			literal->token.text = sview_make_cstr(define_title_val);
+			literal->token.kind = GSX_TOKEN_STRING;
+
+			node->kind = GSX_AST_LITERAL;
+			node->data.literal = literal;
+		}
+		define_title_ast = node;
+	}
+	struct gsx_definition	define_title = {
+		.name = sview_make_cstr(define_title_name),
+		.params = { 0 },
+		.kind = GSX_DEFINITION_VARIABLE,
+		.data = { .ast = define_title_ast },
+	};
+	da_append(definitions, &define_title);
 
 	char*					define_define_name = cstr_clone("core::define");
 	struct dynamic_array	define_define_params = da_make(sizeof(bool));
@@ -1156,6 +1261,11 @@ int		main(int argc, char **argv) {
 	}
 
 	const char*				file_out_path = argv[2];
+	if (cstr_equals(file_in_path, file_out_path)) {
+		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Reading and writing into the same file `%s` is not allowed.\n", program_name, file_out_path);
+		fprintf(stderr, "\t"TERMINAL_NOTICE_USAGE": %s \"%s\" <out.html>\n", program_name, file_in_path);
+		return (2);
+	}
 	if (!cstr_suffix(file_out_path, ".html")) {
 		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Invalid output file extension `%s`.\n", program_name, file_out_path);
 		fprintf(stderr, "\t"TERMINAL_NOTICE_USAGE": %s \"%s\" <out.html>\n", program_name, file_in_path);

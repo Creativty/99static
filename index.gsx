@@ -1,7 +1,7 @@
 <!-- gsx: core::include! "methods.gsx" -->
 <html>
 	<head>
-		<title><!-- gsx: core::env! "TITLE" --></title>
+		<title><!-- gsx: TITLE --></title>
 	</head>
 	<body>
 		<p><!-- gsx: "Hello world" --></p>
