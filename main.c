@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
 #include <stddef.h>
@@ -33,6 +34,9 @@
 #define _STRINGIFY(X) #X
 #define STRINGIFY(X) _STRINGIFY(X)
 
+#define FD_TTY_OUT ((int)1)
+#define FD_TTY_ERR ((int)2)
+
 #ifdef DEBUG_AST_CALLS
 #define fprintf_ast_call(NAME, TOKEN) fprintf(stdout, NAME " :: `%.*s`\n", (int)((TOKEN).text.len), (TOKEN).text.data);
 #else
@@ -59,6 +63,12 @@ void	mem_copy(void *dest, void *source, size_t nbytes) {
 	if (dest == NULL || source == NULL || nbytes == 0) return ;
 	for (size_t i = 0; i < nbytes; i++)
 		((char *)dest)[i] = ((char *)source)[i];
+}
+
+void	mem_fill(void *dest, unsigned char byte, size_t nbytes) {
+	if (dest == NULL || nbytes == 0) return ;
+	for (size_t i = 0; i < nbytes; i++)
+		((unsigned char *)dest)[i] = byte;
 }
 
 void*	mem_clone(void *source, size_t nbytes) {
@@ -90,6 +100,14 @@ int				view_index(struct view string, const char* to_find) {
 	return (-1);
 }
 
+int				view_index_char(struct view string, const char to_find) {
+	if (to_find == '\0') return (-1);
+	for (int i = 0; i < (int)string.len; ++i) {
+		if (string.data[i] == to_find) return (i);
+	}
+	return (-1);
+}
+
 int				view_index_view(struct view string, struct view to_find) {
 	if (to_find.data == NULL || to_find.len == 0) return (-1);
 
@@ -115,6 +133,13 @@ struct view		view_make_cstr_const(const char* cstr) {
 
 struct view		view_make(char* data, size_t len) {
 	return ((struct view){ data, len });
+}
+
+struct view		view_slice(struct view string, size_t begin, size_t end) {
+	if (begin > string.len) return (view_make(NULL, 0ul));
+	if (end > string.len) end = string.len;
+	size_t	len = end - begin;
+	return (view_make(&string.data[begin], len));
 }
 
 struct view		view_drop(struct view string, int count) {
@@ -208,12 +233,21 @@ int		cstr_index(const char* str, const char* to_find) {
 	return (view_index(vstr, to_find));
 }
 
+int		cstr_index_char(const char* str, const char to_find) {
+	struct view	vstr = view_make_cstr_const(str);
+	return (view_index_char(vstr, to_find));
+}
+
 bool	cstr_equals(const char *lhs, const char *rhs) {
 	return (cstr_length(lhs) == cstr_length(rhs) && cstr_index(lhs, rhs) == 0);
 }
 
 bool	cstr_contains(const char *str, const char *to_find) {
 	return (cstr_index(str, to_find) >= 0);
+}
+
+bool	cstr_contains_char(const char *str, const char to_find) {
+	return (cstr_index_char(str, to_find) >= 0);
 }
 
 bool	cstr_prefix(const char* str, const char* prefix) {
@@ -373,6 +407,154 @@ void					string_builder_write_long(struct string_builder* sb, long n) {
 void					string_builder_write_bool(struct string_builder* sb, bool b) {
 	const char*	text = b ? "true" : "false";
 	string_builder_write_cstr(sb, text);
+}
+
+/*	Print_Format	*/
+
+#define PRINT_LEADER '%'
+#define PRINT_SYMBOL_SET "#_abcdefghijklmnopqrstuvwxyz0123456789"
+#define PRINT_REGISTERY_CAPACITY 16ul
+
+typedef void				(*print_writer)(int, va_list);
+
+struct						print_definition {
+	struct view			name;
+	print_writer		writer;
+};
+struct						print_registery {
+	struct print_definition	defs[PRINT_REGISTERY_CAPACITY];
+	size_t					defs_len;
+}							print_registery;
+bool						print_registery_init = false;
+
+void						print_definition_add(struct view name, print_writer writer) {
+	assert(print_registery.defs_len < PRINT_REGISTERY_CAPACITY && "Too many print definitions registered, PRINT_REGISTERY_CAPACITY has been reached");
+	if (name.len == 0 || writer == NULL) return ;
+
+	struct print_definition*	def = &print_registery.defs[print_registery.defs_len++];
+	def->name = name;
+	def->writer = writer;
+}
+
+struct print_definition*	print_definition_get(struct view name) {
+	for (size_t i = 0ul; i < print_registery.defs_len; ++i) {
+		struct print_definition*	def = &print_registery.defs[i];
+		if (view_equals(name, def->name)) return (def);
+	}
+	return (NULL);
+}
+
+void						_print_writer_long(int fd, long n) {
+	if (n == LONG_MIN)
+		write(fd, "-9223372036854775808", 19);
+	else if (n < 0l) {
+		write(fd, "-", 1);
+		_print_writer_long(fd, -n);
+	}
+	else if (n >= 10l) {
+		_print_writer_long(fd, n/ 10l);
+		write(fd, &("0123456789"[n % 10l]), 1);
+	}
+	else {
+		write(fd, &("0123456789"[n % 10l]), 1);
+	}
+}
+
+void						_print_writer_ulong(int fd, unsigned long n) {
+	if (n >= 10ul) {
+		_print_writer_long(fd, n/ 10ul);
+		write(fd, &("0123456789"[n % 10ul]), 1);
+	}
+	else {
+		write(fd, &("0123456789"[n % 10ul]), 1);
+	}
+}
+
+void						print_writer_uint(int fd, va_list args) {
+	unsigned int	n = va_arg(args, unsigned int);
+	_print_writer_ulong(fd, (unsigned long)n);
+}
+
+void						print_writer_ulong(int fd, va_list args) {
+	unsigned long	n = va_arg(args, long);
+	_print_writer_ulong(fd, n);
+}
+
+void						print_writer_int(int fd, va_list args) {
+	int	n = va_arg(args, int);
+	_print_writer_long(fd, (long)n);
+}
+
+void						print_writer_long(int fd, va_list args) {
+	long	n = va_arg(args, long);
+	_print_writer_long(fd, n);
+}
+
+void						print_writer_cstr(int fd, va_list args) {
+	const char*	s = va_arg(args, const char*);
+	write(fd, s, cstr_length(s));
+}
+
+void						print_writer_view(int fd, va_list args) {
+	struct view	s = va_arg(args, struct view);
+	write(fd, s.data, s.len);
+}
+
+void						print_writer_view_alt(int fd, va_list args) {
+	struct view	s = va_arg(args, struct view);
+	write(fd, "\"", 1ul);
+	write(fd, s.data, s.len);
+	write(fd, "\"", 1ul);
+}
+
+void						print_va(int fd, const char* fmt, va_list args) {
+	if (!print_registery_init) {
+		mem_fill(&print_registery, 0, sizeof(struct print_registery));
+		print_definition_add(view_make_cstr_const("int"), print_writer_int);
+		print_definition_add(view_make_cstr_const("long"), print_writer_long);
+		print_definition_add(view_make_cstr_const("uint"), print_writer_uint);
+		print_definition_add(view_make_cstr_const("ulong"), print_writer_ulong);
+		print_definition_add(view_make_cstr_const("cstr"), print_writer_cstr);
+		print_definition_add(view_make_cstr_const("view"), print_writer_view);
+		print_definition_add(view_make_cstr_const("#view"), print_writer_view_alt);
+		print_registery_init = true;
+	}
+
+	struct view								fmt_view = view_make_cstr_const(fmt);
+	for (size_t i = 0ul; i < fmt_view.len;) {
+		char								leading = fmt_view.data[i];
+		if (leading == PRINT_LEADER) {
+			size_t							j = 0;
+			char							terminus = '\0';
+			for (j = i; j < fmt_view.len;) {
+				terminus = fmt_view.data[++j];
+				if (terminus == PRINT_LEADER) break ;
+				if (!cstr_contains_char(PRINT_SYMBOL_SET, fmt_view.data[j])) break ;
+			}
+			if (terminus == PRINT_LEADER) {
+				struct view					name = view_slice(fmt_view, i + 1, j);
+				if (name.len > 0ul) {
+					struct print_definition*	def = print_definition_get(name);
+					if (def != NULL) def->writer(fd, args);
+					else {
+						write(fd, "%", 1ul);
+						write(fd, name.data, name.len);
+						write(fd, "?%", 2ul);
+					}
+				} else write(fd, "%", 1ul);
+				i = j + 1;
+				continue ;
+			}
+		}
+		write(fd, &fmt_view.data[i], (int)sizeof(char));
+		++i;
+	}
+}
+
+void						print(int fd, const char* fmt, ...) {
+	va_list	args; va_start(args, fmt);
+	print_va(fd, fmt, args);
+	va_end(args);
 }
 
 /*	 OS_File	*/
@@ -1568,6 +1750,7 @@ void				gsx_free_definitions(struct dynamic_array* definitions) {
 /*	 Entry_Point	*/
 
 int		main(int argc, char **argv) {
+	print(FD_TTY_OUT, "Hello %cstr% %ulong% %#view% %% %dynamic_array%% world\n", "world!", ULONG_MAX, view_make_cstr_const("view data"));
 	program_name = argv[0];
 
 	if (argc != 3) {
