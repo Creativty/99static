@@ -511,6 +511,20 @@ void						_print_writer_ulong(int fd, unsigned long n) {
 	}
 }
 
+void						_print_writer_addr(int fd, unsigned long n) {
+	if (n >= 16ul) {
+		_print_writer_long(fd, n/ 16ul);
+		write(fd, &("0123456789ABCDEF"[n % 16ul]), 1);
+	}
+	else {
+		write(fd, &("0123456789ABCDEF"[n % 16ul]), 1);
+	}
+}
+
+void						_print_writer_bool(int fd, bool b) {
+	_print_writer_cstr(fd, b ? "true" : "false");
+}
+
 void						print_writer_uint(int fd, va_list args) {
 	unsigned int	n = va_arg(args, unsigned int);
 	_print_writer_ulong(fd, (unsigned long)n);
@@ -532,7 +546,8 @@ void						print_writer_long(int fd, va_list args) {
 }
 
 void						print_writer_char(int fd, va_list args) {
-	char	c = va_arg(args, char);
+	/* NOTE(xenobas): char is promoted to int when passed through ... */
+	char	c = (char)va_arg(args, int);
 	_print_writer_char(fd, c);
 }
 
@@ -564,6 +579,18 @@ void						print_writer_view_alt(int fd, va_list args) {
 	_print_writer_view_alt(fd, v, w);
 }
 
+void						print_writer_bool(int fd, va_list args) {
+	bool	b = (bool)va_arg(args, int);
+	_print_writer_bool(fd, b);
+}
+
+void						print_writer_addr(int fd, va_list args) {
+	void*	addr = va_arg(args, void*);
+	_print_writer_cstr(fd, "&0x");
+	_print_writer_addr(fd, (unsigned long)addr);
+	(void)args;
+}
+
 void						print_writer_errno(int fd, va_list args) {
 	(void)args;
 	_print_writer_cstr(fd, strerror(errno));
@@ -574,16 +601,18 @@ void						print_registery_init(void) {
 		print_registery_is_init = true;
 
 		mem_fill(&print_registery, 0, sizeof(struct print_registery));
-		print_definition_add(view_make_cstr_const("int"), print_writer_int);
 		print_definition_add(view_make_cstr_const("char"), print_writer_char);
-		print_definition_add(view_make_cstr_const("long"), print_writer_long);
-		print_definition_add(view_make_cstr_const("uint"), print_writer_uint);
-		print_definition_add(view_make_cstr_const("ulong"), print_writer_ulong);
 		print_definition_add(view_make_cstr_const("cstr"), print_writer_cstr);
 		print_definition_add(view_make_cstr_const("view"), print_writer_view);
-		print_definition_add(view_make_cstr_const("errno"), print_writer_errno);
 		print_definition_add(view_make_cstr_const("#cstr"), print_writer_cstr_alt);
 		print_definition_add(view_make_cstr_const("#view"), print_writer_view_alt);
+		print_definition_add(view_make_cstr_const("int"), print_writer_int);
+		print_definition_add(view_make_cstr_const("uint"), print_writer_uint);
+		print_definition_add(view_make_cstr_const("long"), print_writer_long);
+		print_definition_add(view_make_cstr_const("ulong"), print_writer_ulong);
+		print_definition_add(view_make_cstr_const("addr"), print_writer_addr);
+		print_definition_add(view_make_cstr_const("bool"), print_writer_bool);
+		print_definition_add(view_make_cstr_const("errno"), print_writer_errno);
 	}
 }
 
@@ -1564,7 +1593,7 @@ struct gsx_box*		gsx_process_expression(struct dynamic_array* definitions, struc
 	struct gsx_ast*			syntax_tree = gsx_ast_parse(definitions, &tokens);
 	if (syntax_tree == NULL)
 		goto gsx_process_expression_return;
-	print(ttyout, "%gsx_ast%\n", syntax_tree);
+	/* print(ttyout, "%gsx_ast%\n", syntax_tree); */
 	production = gsx_process_ast(definitions, syntax_tree);
 	gsx_ast_free(syntax_tree);
 
@@ -1898,16 +1927,16 @@ int		main(int argc, char **argv) {
 
 	struct string_builder	sb = string_builder_make();
 	for (int i = 0; i < (int)boxes.len; ++i) {
-		// struct gsx_section	section = da_at(struct gsx_section, &sections, i);
+		/* struct gsx_section	section = da_at(struct gsx_section, &sections, i); */
 		struct gsx_box*		box	= da_at(struct gsx_box*, &boxes, i);
 		if (box == NULL) continue ;
 		if (box->kind == GSX_BOX_STRING) string_builder_write_cstr(&sb, box->data.str);
 		if (box->kind == GSX_BOX_CHAR) string_builder_write_char(&sb, box->data.character);
 		if (box->kind == GSX_BOX_INTEGER) string_builder_write_long(&sb, box->data.integer);
-		// struct view		string = view_trim(view_make_cstr_const(str), " \r\n\t");
-		// if (section.is_expression && string.len == 0ul)
-		// 	continue ;
-		// string_builder_write_cstr(&sb, str);
+		/* struct view		string = view_trim(view_make_cstr_const(str), " \r\n\t"); */
+		/* if (section.is_expression && string.len == 0ul) */
+		/* 	continue ; */
+		/* string_builder_write_cstr(&sb, str); */
 	}
 
 	struct view			file_out_view = string_builder_as_view(sb);
