@@ -28,7 +28,7 @@ syntax match	gsxArraySeparator		/,/ containedin=gsxArray
 syntax match	gsxDestructureSeparator	/:/ containedin=gsxArray
 syntax region	gsxArray				start="\[*" end="*\]" oneline
 
-syntax match	gsxNumber		/\<[0-9]\+\>/ contained
+syntax match	gsxNumber		/[-]\<[0-9]\+\>/ contained
 syntax region	gsxChar			start=+\%(L\|U\|u8\)\='+ skip=+\\\\\|\\'+ end=+'+ oneline contained
 syntax region	gsxString		start=+\%(L\|U\|u8\)\="+ skip=+\\\\\|\\"+ end=+"+ oneline contained
 syntax region	gsxComment		start=/<!--\s*gsx:\s*/ end='-->' contains=gsxKeyword,gsxChar,gsxString,gsxIdentifier,gsxCall,gsxScope,gsxNumber,gsxParamsSeparator,gsxArraySeparator,gsxArray oneline
