@@ -1,4 +1,7 @@
+tags
+99static
+
+# Patterns
 *.d
 *.o
 *.html
-99static
