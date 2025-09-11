@@ -1,6 +1,5 @@
 #include <errno.h>
 #include <fcntl.h>
-#include <stdio.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <string.h>
@@ -34,13 +33,13 @@
 #define _STRINGIFY(X) #X
 #define STRINGIFY(X) _STRINGIFY(X)
 
-#define FD_TTY_OUT ((int)1)
-#define FD_TTY_ERR ((int)2)
+#define ttyout ((int)1)
+#define ttyerr ((int)2)
 
 #ifdef DEBUG_AST_CALLS
-#define fprintf_ast_call(NAME, TOKEN) fprintf(stdout, NAME " :: `%.*s`\n", (int)((TOKEN).text.len), (TOKEN).text.data);
+#define print_ast_call(NAME, TOKEN) print(ttyout, NAME " :: %gsx_token%\n", (TOKEN));
 #else
-#define fprintf_ast_call(NAME, TOKEN) ((void)(NAME), (void)(TOKEN))
+#define print_ast_call(NAME, TOKEN) ((void)(NAME), (void)(TOKEN))
 #endif
 
 /*	 Program	*/
@@ -98,6 +97,23 @@ int				view_index(struct view string, const char* to_find) {
 		if (match && j == length_to_find) return (i);
 	}
 	return (-1);
+}
+
+int				view_index_last(struct view string, const char* to_find) {
+	int	length_to_find = cstr_length(to_find);
+	if (to_find == NULL || length_to_find == 0) return (-1);
+
+	int	position = -1;
+	for (int i = 0; i < (int)string.len; ++i) {
+		int		j = 0;
+		bool	match = true;
+		while (j < length_to_find && j + i < (int)string.len && match) {
+			match = (string.data[i + j] == to_find[j]);
+			j++;
+		}
+		if (match && j == length_to_find) position = i;
+	}
+	return (position);
 }
 
 int				view_index_char(struct view string, const char to_find) {
@@ -196,7 +212,7 @@ bool			view_prefix(struct view string, const char* prefix) {
 bool			view_suffix(struct view string, const char* suffix) {
 	int	length_suffix = cstr_length(suffix);
 	if ((int)string.len < length_suffix) return (false);
-	return (view_index(string, suffix) == ((int)string.len - length_suffix));
+	return (view_index_last(string, suffix) == ((int)string.len - length_suffix));
 }
 
 /*	 C_String	*/
@@ -413,7 +429,7 @@ void					string_builder_write_bool(struct string_builder* sb, bool b) {
 
 #define PRINT_LEADER '%'
 #define PRINT_SYMBOL_SET "#_abcdefghijklmnopqrstuvwxyz0123456789"
-#define PRINT_REGISTERY_CAPACITY 16ul
+#define PRINT_REGISTERY_CAPACITY 32ul
 
 typedef void				(*print_writer)(int, va_list);
 
@@ -425,10 +441,11 @@ struct						print_registery {
 	struct print_definition	defs[PRINT_REGISTERY_CAPACITY];
 	size_t					defs_len;
 }							print_registery;
-bool						print_registery_init = false;
+bool						print_registery_is_init = false;
 
 void						print_definition_add(struct view name, print_writer writer) {
-	assert(print_registery.defs_len < PRINT_REGISTERY_CAPACITY && "Too many print definitions registered, PRINT_REGISTERY_CAPACITY has been reached");
+	assert(print_registery_is_init && "Cannot add print definition before default definitions");
+	assert(print_registery.defs_len < ((size_t)PRINT_REGISTERY_CAPACITY) && "Too many print definitions registered, Consider raising the capacity.");
 	if (name.len == 0 || writer == NULL) return ;
 
 	struct print_definition*	def = &print_registery.defs[print_registery.defs_len++];
@@ -442,6 +459,30 @@ struct print_definition*	print_definition_get(struct view name) {
 		if (view_equals(name, def->name)) return (def);
 	}
 	return (NULL);
+}
+
+void						_print_writer_char(int fd, const char c) {
+	write(fd, &c, 1ul);
+}
+
+void						_print_writer_cstr(int fd, const char* s) {
+	write(fd, s, cstr_length(s));
+}
+
+void						_print_writer_cstr_alt(int fd, const char* s, char c) {
+	write(fd, &c, 1ul);
+	write(fd, s, cstr_length(s));
+	write(fd, &c, 1ul);
+}
+
+void						_print_writer_view(int fd, struct view v) {
+	write(fd, v.data, v.len);
+}
+
+void						_print_writer_view_alt(int fd, struct view v, char c) {
+	write(fd, &c, 1ul);
+	write(fd, v.data, v.len);
+	write(fd, &c, 1ul);
 }
 
 void						_print_writer_long(int fd, long n) {
@@ -490,37 +531,66 @@ void						print_writer_long(int fd, va_list args) {
 	_print_writer_long(fd, n);
 }
 
+void						print_writer_char(int fd, va_list args) {
+	char	c = va_arg(args, char);
+	_print_writer_char(fd, c);
+}
+
 void						print_writer_cstr(int fd, va_list args) {
 	const char*	s = va_arg(args, const char*);
-	write(fd, s, cstr_length(s));
+	_print_writer_cstr(fd, s);
 }
 
 void						print_writer_view(int fd, va_list args) {
-	struct view	s = va_arg(args, struct view);
-	write(fd, s.data, s.len);
+	struct view	v = va_arg(args, struct view);
+	_print_writer_view(fd, v);
+}
+
+void						print_writer_cstr_alt(int fd, va_list args) {
+	const char*	s = va_arg(args, const char*);
+	struct view	v = view_make_cstr_const(s);
+	char		w = '"';
+	if (v.len >= 2 && view_prefix(v, "\"") && view_suffix(v, "\"")) w = '`';
+
+	_print_writer_view_alt(fd, v, w);
 }
 
 void						print_writer_view_alt(int fd, va_list args) {
-	struct view	s = va_arg(args, struct view);
-	write(fd, "\"", 1ul);
-	write(fd, s.data, s.len);
-	write(fd, "\"", 1ul);
+	struct view	v = va_arg(args, struct view);
+	char		w = '"';
+	if (v.len >= 2 && view_prefix(v, "\"") && view_suffix(v, "\""))
+		w = '`';
+
+	_print_writer_view_alt(fd, v, w);
 }
 
-void						print_va(int fd, const char* fmt, va_list args) {
-	if (!print_registery_init) {
+void						print_writer_errno(int fd, va_list args) {
+	(void)args;
+	_print_writer_cstr(fd, strerror(errno));
+}
+
+void						print_registery_init(void) {
+	if (!print_registery_is_init) {
+		print_registery_is_init = true;
+
 		mem_fill(&print_registery, 0, sizeof(struct print_registery));
 		print_definition_add(view_make_cstr_const("int"), print_writer_int);
+		print_definition_add(view_make_cstr_const("char"), print_writer_char);
 		print_definition_add(view_make_cstr_const("long"), print_writer_long);
 		print_definition_add(view_make_cstr_const("uint"), print_writer_uint);
 		print_definition_add(view_make_cstr_const("ulong"), print_writer_ulong);
 		print_definition_add(view_make_cstr_const("cstr"), print_writer_cstr);
 		print_definition_add(view_make_cstr_const("view"), print_writer_view);
+		print_definition_add(view_make_cstr_const("errno"), print_writer_errno);
+		print_definition_add(view_make_cstr_const("#cstr"), print_writer_cstr_alt);
 		print_definition_add(view_make_cstr_const("#view"), print_writer_view_alt);
-		print_registery_init = true;
 	}
+}
 
+void						print_va(int fd, const char* fmt, va_list args) {
 	struct view								fmt_view = view_make_cstr_const(fmt);
+
+	print_registery_init();
 	for (size_t i = 0ul; i < fmt_view.len;) {
 		char								leading = fmt_view.data[i];
 		if (leading == PRINT_LEADER) {
@@ -711,31 +781,6 @@ struct				gsx_token {
 	struct view		text;
 	enum gsx_token_kind	kind;
 };
-
-int					gsx_token_kind_fprint(FILE* file, enum gsx_token_kind kind) {
-	switch (kind) {
-		case GSX_TOKEN_INTEGER: return (fprintf(file, "integer"));
-		case GSX_TOKEN_STRING: return (fprintf(file, "string"));
-		case GSX_TOKEN_INVALID: return (fprintf(file, "invalid"));
-		case GSX_TOKEN_IDENT: return (fprintf(file, "identifier"));
-		case GSX_TOKEN_CALL: return (fprintf(file, "function call"));
-		case GSX_TOKEN_CHAR: return (fprintf(file, "character"));
-		case GSX_TOKEN_ARRAY_OPEN: return (fprintf(file, "array open"));
-		case GSX_TOKEN_ARRAY_CLOSE: return (fprintf(file, "array close"));
-		case GSX_TOKEN_ARRAY_SEPARATOR: return (fprintf(file, "array separator"));
-		case GSX_TOKEN_PARAMS_DELIMITER: return (fprintf(file, "parameters delimiter"));
-		case GSX_TOKEN_DESTRUCTURE_SEPARATOR: return (fprintf(file, "destructure separator"));
-		default: return (fprintf(file, "unknown (%d)", kind));
-	}
-}
-
-int					gsx_token_fprint(FILE* file, struct gsx_token token) {
-	int	ret = 0;
-	ret += fprintf(file, "token{ `%.*s` ", (int)token.text.len, token.text.data);
-	ret += gsx_token_kind_fprint(file, token.kind);
-	ret += fprintf(file, " }");
-	return (ret);
-}
 
 bool				gsx_token_is_expression(enum gsx_token_kind kind) {
 	if (kind == GSX_TOKEN_CALL) return (true);
@@ -929,11 +974,7 @@ bool				gsx_parser_accept_any(struct gsx_parser* parser, enum gsx_token_kind* ki
 
 bool				gsx_parser_expect(struct gsx_parser* parser, enum gsx_token_kind kind) {
 	if (!gsx_parser_accept(parser, kind)) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Expected `", program_name);
-		gsx_token_kind_fprint(stderr, kind);
-		fprintf(stderr, "`, got ");
-		gsx_token_fprint(stderr, gsx_parser_peek(parser));
-		fprintf(stderr, " instead.\n");
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Expected %gsx_token_kind%, got %gsx_token% instead\n", program_name, kind, gsx_parser_peek(parser));
 		return (parser->ok = false);
 	}
 	return (true);
@@ -941,19 +982,12 @@ bool				gsx_parser_expect(struct gsx_parser* parser, enum gsx_token_kind kind) {
 
 bool				gsx_parser_expect_any(struct gsx_parser* parser, enum gsx_token_kind* kinds, size_t kinds_count) {
 	if (!gsx_parser_accept_any(parser, kinds, kinds_count)) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Expected ", program_name);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Expected ", program_name);
 		for (size_t i = 0; i < kinds_count; ++i) {
-			enum gsx_token_kind	kind = kinds[i];
-			fprintf(stderr, "`");
-			gsx_token_kind_fprint(stderr, kind);
-			fprintf(stderr, "`");
-			if (i + 1 < kinds_count)
-				fprintf(stderr, " | ");
+			print(ttyerr, "%gsx_token_kind%", kinds[i]);
+			if (i + 1 < kinds_count) print(ttyerr, " | ");
 		}
-		fprintf(stderr, ", got ");
-		struct gsx_token	token = gsx_parser_peek(parser);
-		gsx_token_fprint(stderr, token);
-		fprintf(stderr, " instead.\n");
+		print(ttyerr, ", got %gsx_token% instead\n", gsx_parser_peek(parser));
 		return (parser->ok = false);
 	}
 	return (true);
@@ -1022,41 +1056,6 @@ struct							gsx_ast {
 	}					data;
 };
 
-void							gsx_ast_print(FILE* file, struct gsx_ast *node, int indent) {
-	if (node == NULL) return ;
-
-	for (int i = 0; i < indent; ++i) fprintf(file, "\t");
-	switch (node->kind) {
-		case GSX_AST_CALL: {
-			struct gsx_ast_call*	call = node->data.call;
-			fprintf(file, "- call `%.*s`\n", (int)call->name.text.len, call->name.text.data);
-			for (size_t i = 0; i < call->args.len; ++i) {
-				struct gsx_ast*	node = da_at(struct gsx_ast*, &call->args, i);
-				gsx_ast_print(file, node, indent + 1);
-			}
-		} break ;
-		case GSX_AST_DEFINE: {
-			struct gsx_ast_define*	define = node->data.define;
-			struct gsx_token		name = define->name;
-			fprintf(file, "- call define `%.*s`\n", (int)name.text.len, name.text.data);
-		} break ;
-		case GSX_AST_LITERAL: {
-			struct gsx_ast_literal*	literal = node->data.literal;
-			fprintf(file, "- literal `%.*s`\n", (int)literal->token.text.len, literal->token.text.data);
-		} break ;
-		case GSX_AST_IDENT: {
-			struct gsx_ast_ident*	ident = node->data.ident;
-			fprintf(file, "- ident `%.*s`\n", (int)ident->name.text.len, ident->name.text.data);
-		} break ;
-		case GSX_AST_INVALID: {
-			fprintf(file, "- invalid\n");
-		} break ;
-		default: {
-			fprintf(file, "- unknown\n");
-		} break ;
-	}
-}
-
 void							gsx_ast_free_define_param(struct gsx_ast_define_param* param) {
 	(void)param;
 }
@@ -1073,7 +1072,7 @@ void							gsx_ast_free(struct gsx_ast* node) {
 			da_free(&call->args);
 		} break ;
 		case GSX_AST_DEFINE: {
-			fprintf(stderr, "%s:\t" TERMINAL_NOTICE_TODO ": gsx_ast_free(kind = GSX_AST_DEFINE)\n", program_name);
+			print(ttyerr, "%cstr%:\t" TERMINAL_NOTICE_TODO ": gsx_ast_free(kind = GSX_AST_DEFINE)\n", program_name);
 		} break ;
 		case GSX_AST_LITERAL: {
 		} break ;
@@ -1104,7 +1103,7 @@ struct gsx_ast_define_param*	gsx_ast_new_define_param(enum gsx_ast_define_param_
 struct gsx_ast*					gsx_ast_parse_ident(struct gsx_parser* parser) {
 	if (!gsx_parser_expect(parser, GSX_TOKEN_IDENT)) return (NULL);
 	struct gsx_token		name = parser->current;
-	fprintf_ast_call("gsx_ast_parse_ident", name);
+	print_ast_call("gsx_ast_parse_ident", name);
 	struct gsx_ast*			node = malloc(sizeof(struct gsx_ast) + sizeof(struct gsx_ast_ident));
 	struct gsx_ast_ident*	ident = (struct gsx_ast_ident*)&((char *)node)[sizeof(struct gsx_ast)];
 	if (node != NULL) {
@@ -1120,8 +1119,7 @@ struct gsx_ast*					gsx_ast_parse_literal(struct gsx_parser* parser) {
 	const size_t				lit_kinds_count = sizeof(lit_kinds) / sizeof(lit_kinds[0]);
 	if (!gsx_parser_expect_any(parser, lit_kinds, lit_kinds_count)) return (NULL);
 	struct gsx_token		token = parser->current;
-	fprintf_ast_call("gsx_ast_parse_literal", token);
-	/* fprintf(stderr, "gsx_ast_parse_literal :: `%.*s`\n", (int)token.text.len, token.text.data); */
+	print_ast_call("gsx_ast_parse_literal", token);
 	struct gsx_ast*			node = malloc(sizeof(struct gsx_ast) + sizeof(struct gsx_ast_literal));
 	struct gsx_ast_literal*	literal = (struct gsx_ast_literal*)&((char *)node)[sizeof(struct gsx_ast)];
 	if (node != NULL) {
@@ -1142,7 +1140,7 @@ struct gsx_ast*					gsx_ast_parse_define_param(struct gsx_parser* parser) {
 	const size_t				define_param_kinds_count = sizeof(define_param_kinds) / sizeof(define_param_kinds[0]);
 	if (!gsx_parser_expect_any(parser, define_param_kinds, define_param_kinds_count)) return (NULL);
 	struct gsx_token		token = parser->current;
-	fprintf_ast_call("gsx_ast_parse_define_param", token);
+	print_ast_call("gsx_ast_parse_define_param", token);
 	if (token.kind == GSX_TOKEN_CALL) { /* NOTE(xenobas): Value */
 	}
 	return (NULL);
@@ -1152,7 +1150,7 @@ struct gsx_ast*					gsx_ast_parse_define(struct gsx_parser* parser, struct gsx_d
 	if (parser == NULL || definition == NULL) return (NULL);
 
 	struct gsx_token					token = parser->current;
-	fprintf_ast_call("gsx_ast_parse_define", token);
+	print_ast_call("gsx_ast_parse_define", token);
 	if (token.kind != GSX_TOKEN_CALL) return (NULL);
 
 	struct view						text = view_take(token.text, token.text.len - 1ul); /* EXAMPLE(xenobas): core::define */
@@ -1181,7 +1179,7 @@ struct gsx_ast*					gsx_ast_parse_define(struct gsx_parser* parser, struct gsx_d
 		da_free(&params);
 		return (NULL);
 	}
-	return (fprintf(stderr, "%s:\t" TERMINAL_NOTICE_TODO ": gsx_ast_parse_define\n", program_name), NULL);
+	return (print(ttyerr, "%cstr%:\t" TERMINAL_NOTICE_TODO ": gsx_ast_parse_define\n", program_name), NULL);
 }
 
 struct gsx_ast*					gsx_ast_parse_call(struct gsx_parser* parser) {
@@ -1190,11 +1188,11 @@ struct gsx_ast*					gsx_ast_parse_call(struct gsx_parser* parser) {
 	if (!gsx_parser_expect(parser, GSX_TOKEN_CALL)) return (NULL);
 
 	struct gsx_token		name = parser->current;
-	fprintf_ast_call("gsx_ast_parse_call", name);
+	print_ast_call("gsx_ast_parse_call", name);
 	struct view			text = view_take(name.text, name.text.len - 1ul);
 	struct gsx_definition*	definition = gsx_definition_get(parser->definitions, text);
 	if (definition == NULL) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Undeclared function `%.*s` was called!\n", program_name, (int)text.len, text.data);
+		print(ttyerr, "%cstr%:\t" TERMINAL_NOTICE_ERROR ": Undeclared function %#view% was called!\n", program_name, text);
 		return (NULL);
 	}
 	if (view_equals_cstr(text, "core::define")) {
@@ -1219,8 +1217,8 @@ struct gsx_ast*					gsx_ast_parse_call(struct gsx_parser* parser) {
 		da_append(&args, &node);
 	}
 	if (args.len < args_count) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Insufficient arguments passed to `%.*s`!\n", program_name, (int)text.len, text.data);
-		fprintf(stderr, "\tExpected %zu parameters, got %zu arguments instead.\n", args_count, args.len);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Insufficient arguments passed to %#view%!\n", program_name, text);
+		print(ttyerr, "\tExpected %ulong% parameters, got %ulong% arguments instead.\n", args_count, args.len);
 
 		for (size_t i = 0; i < args.len; ++i) {
 			struct gsx_ast*	arg = da_at(struct gsx_ast*, &args, i);
@@ -1255,7 +1253,7 @@ struct gsx_ast*					gsx_ast_parse(const struct dynamic_array* definitions, const
 
 	struct gsx_ast*		ast = NULL;
 	struct gsx_token	token = gsx_parser_peek(&parser);
-	fprintf_ast_call("gsx_ast_parse", token);
+	print_ast_call("gsx_ast_parse", token);
 	if (token.kind == GSX_TOKEN_STRING || token.kind == GSX_TOKEN_CHAR || token.kind == GSX_TOKEN_INTEGER)
 		ast = gsx_ast_parse_literal(&parser);
 	else if (token.kind == GSX_TOKEN_IDENT)
@@ -1270,27 +1268,27 @@ struct gsx_ast*					gsx_ast_parse(const struct dynamic_array* definitions, const
 				extra_count++;
 			}
 
-			fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Extra arguments passed to `%.*s`!\n", program_name, (int)name.len, name.data);
-			fprintf(stderr, "\tExpected %zu parameters, got %zu arguments instead.\n", ast->data.call->args.len, ast->data.call->args.len + extra_count);
+			print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Extra arguments passed to %#view%!\n", program_name, name);
+			print(ttyerr, "\tExpected %ulong% parameters, got %ulong% arguments instead.\n", ast->data.call->args.len, ast->data.call->args.len + extra_count);
 			return (gsx_ast_free(ast), parser.ok = false, NULL);
 		}
 	} else {
 		struct view	name = token.text;
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Expected `expression`, got `%.*s` instead.\n", program_name, (int)name.len, name.data);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Expected \"expression\", got %#view% instead.\n", program_name, name);
 		return (parser.ok = false, NULL);
 	}
 
 	if (!gsx_parser_eof(&parser)) {
 		struct view	name = token.text;
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Multi value expression `%.*s` is not allowed!\n", program_name, (int)name.len, name.data);
-		fprintf(stderr, "\t| remaining tokens = [ ");
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Multi value expression %#view% is not allowed!\n", program_name, name);
+		print(ttyerr, "\t| remaining tokens = [ ");
 		while (!gsx_parser_eof(&parser)) {
 			struct gsx_token	token = gsx_parser_next(&parser);
-			fprintf(stderr, "`%.*s`", (int)token.text.len, token.text.data);
+			print(ttyerr, "%gsx_token%", token);
 			if (!gsx_parser_eof(&parser))
-				fprintf(stderr, ", ");
+				print(ttyerr, ", ");
 		}
-		fprintf(stderr, " ]\n");
+		print(ttyerr, " ]\n");
 		return (gsx_ast_free(ast), parser.ok = false, NULL);
 	} else return (ast);
 }
@@ -1425,25 +1423,25 @@ struct gsx_box*		gsx_process_ast_ident(const struct dynamic_array* definitions, 
 	struct gsx_definition*	definition = gsx_definition_get(definitions, text);
 	struct gsx_box*			retval = gsx_process_ast(definitions, definition->data.ast);
 	if (retval == NULL)
-		fprintf(stderr, "%s:\t" TERMINAL_NOTICE_ERROR ": Referenced undeclared identifier `%.*s`!\n", program_name, (int)text.len, text.data);
+		print(ttyerr, "%cstr%:\t" TERMINAL_NOTICE_ERROR ": Referenced undeclared identifier %#view%!\n", program_name, text);
 	return (retval);
 }
 
 struct gsx_box*		gsx_process_ast_call(const struct dynamic_array* definitions, struct gsx_ast_call* call) {
 	struct dynamic_array			args = call->args;
-	struct view					text = { .data = call->name.text.data, .len = call->name.text.len - 1u };
+	struct view						text = { .data = call->name.text.data, .len = call->name.text.len - 1ul };
 	struct gsx_box*					retval = NULL;
 	struct gsx_definition*			definition = gsx_definition_get(definitions, text);
 	if (definition == NULL) {
-		fprintf(stderr, "%s:\t" TERMINAL_NOTICE_ERROR ": Called undeclared function `%.*s`!\n", program_name, (int)text.len, text.data);
+		print(ttyerr, "%cstr%:\t" TERMINAL_NOTICE_ERROR ": Called undeclared function %#view%!\n", program_name, text);
 		goto gsx_process_ast_call_return;
 	}
 
 	enum gsx_definition_kind		kind = definition->kind;
 	struct dynamic_array			params = definition->params;
 	if (params.len != args.len) {
-		fprintf(stderr, "%s:\t" TERMINAL_NOTICE_ERROR ": Called function `%.*s` with incorrect number of arguments.\n", program_name, (int)text.len, text.data);
-		fprintf(stderr, "\tExpected %zu, got %zu arguments instead.\n", params.len, args.len);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Called function %#view% with incorrect number of arguments\n", program_name, text);
+		print(ttyerr, "\tExpected %ulong% parameters, got %ulong% arguments instead.\n", params.len, args.len);
 		goto gsx_process_ast_call_return;
 	}
 	switch (kind) {
@@ -1453,8 +1451,8 @@ struct gsx_box*		gsx_process_ast_call(const struct dynamic_array* definitions, s
 		case GSX_DEFINITION_INTERNAL: {
 			gsx_definition_internal		function = definition->data.internal;
 			if (function == NULL) {
-				fprintf(stderr, "%s:\t" TERMINAL_NOTICE_ERROR ": Unimplemented internal function `%.*s`.\n", program_name, (int)text.len, text.data);
-				fprintf(stderr, "\tQuestion: How did you even get here?\n");
+				print(ttyerr, "%cstr%:\t" TERMINAL_NOTICE_ERROR ": Unimplemented internal function %#view%.\n", program_name, text);
+				print(ttyerr, "\tQuestion: How did you even get here?\n");
 				goto gsx_process_ast_call_return;
 			}
 
@@ -1464,7 +1462,7 @@ struct gsx_box*		gsx_process_ast_call(const struct dynamic_array* definitions, s
 				struct gsx_ast*	ast = da_at(struct gsx_ast*, &args, i);
 				struct gsx_box*	box = gsx_process_ast(definitions, ast);
 				if (box == NULL) {
-					fprintf(stderr, "%s:\t" TERMINAL_NOTICE_ERROR ": Cannot pass void value to `%.*s` in argument hole %zu.\n", program_name, (int)text.len, text.data, i);
+					print(ttyerr, "%cstr%:\t" TERMINAL_NOTICE_ERROR ": Cannot pass void value to %#view% in argument hole %ulong%.\n", program_name, text, i);
 					args_ok = false;
 					continue ;
 				}
@@ -1480,24 +1478,24 @@ struct gsx_box*		gsx_process_ast_call(const struct dynamic_array* definitions, s
 			}
 			retval = function(&args_boxed);
 			if (retval == NULL) {
-				fprintf(stderr, "%s:\t" TERMINAL_NOTICE_ERROR ": Disallowed function `%.*s` returns void expression.\n", program_name, (int)text.len, text.data);
-				fprintf(stderr, "\tHint: Will be supported in the future.\n");
+				print(ttyerr, "%s:\t" TERMINAL_NOTICE_ERROR ": Disallowed function %#view% returns void expression.\n", program_name, text);
+				print(ttyerr, "\tHint: Might be supported in the future.\n");
 				goto gsx_process_ast_call_return;
 			}
 		} break ;
 		case GSX_DEFINITION_VARIABLE: {
-			fprintf(stderr, "%s:\t" TERMINAL_NOTICE_ERROR ": Cannot call variable `%.*s` as if it was a function.\n", program_name, (int)text.len, text.data);
-			fprintf(stderr, "\tQuestion: How did you even get here?\n");
+			print(ttyerr, "%cstr%:\t" TERMINAL_NOTICE_ERROR ": Cannot call variable %#view% as if it was a function\n", program_name, text);
+			print(ttyerr, "\tQuestion: How did you even get here?\n");
 			goto gsx_process_ast_call_return;
 		} break ;
 		case GSX_DEFINITION_INVALID: {
-			fprintf(stderr, "%s:\t" TERMINAL_NOTICE_ERROR ": Called function `%.*s` with invalid registered definition.\n", program_name, (int)text.len, text.data);
-			fprintf(stderr, "\tQuestion: How did you even get here?\n");
+			print(ttyerr, "%cstr%:\t" TERMINAL_NOTICE_ERROR ": Called function %#view% with invalid registered definition.\n", program_name, text);
+			print(ttyerr, "\tQuestion: How did you even get here?\n");
 			goto gsx_process_ast_call_return;
 		} break ;
 		default: {
-			fprintf(stderr, "%s:\t" TERMINAL_NOTICE_ERROR ": Called function `%.*s` with unreachable registered definition.\n", program_name, (int)text.len, text.data);
-			fprintf(stderr, "\tQuestion: How did you even get here?\n");
+			print(ttyerr, "%cstr%:\t" TERMINAL_NOTICE_ERROR ": Called function %#view% with unreachable registered definition.\n", program_name, text);
+			print(ttyerr, "\tQuestion: How did you even get here?\n");
 			goto gsx_process_ast_call_return;
 		} break ;
 	}
@@ -1531,10 +1529,10 @@ struct gsx_box*		gsx_process_expression(struct dynamic_array* definitions, struc
 	for (size_t i = 0; i < expression.len; ++i) { /* NOTE(xenobas): Do not allow for multiline expressions... for now that is. */
 		if (expression.data[i] == '\n') {
 			struct view	text = view_trim(expression, " \r\n\t");
-			fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Unsupported multiline gsx comment\n\t|\t", program_name);
-			if (text.len > 0) fprintf(stderr, "%.*s\n", (int)text.len, text.data);
-			else fprintf(stderr, "<empty comment>\n");
-			fprintf(stderr, "\t|\n");
+			print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Unsupported multiline gsx comment\n\t|\t", program_name);
+			if (text.len > 0) print(ttyerr, "%view%\n", text);
+			else print(ttyerr, "<empty comment>\n");
+			print(ttyerr, "\t|\n");
 			return (NULL);
 		}
 	}
@@ -1548,30 +1546,26 @@ struct gsx_box*		gsx_process_expression(struct dynamic_array* definitions, struc
 			struct gsx_token	token = da_at(struct gsx_token, &tokens, i);
 
 			token.text = view_trim(token.text, " \n\r\t");
-			gsx_token_fprint(stderr, token);
-			fprintf(stderr, "\n");
+			print(ttyerr, "%gsx_token%\n", token);
 		}
 		goto gsx_process_expression_return;
 	}
 	if (false) {
-		fprintf(stdout, "tokens = { ");
+		print(ttyout, "tokens = { ");
 		for (size_t i = 0; i < tokens.len; ++i) {
 			struct gsx_token	token = da_at(struct gsx_token, &tokens, i);
-			struct view		text = view_trim(token.text, " \n\r\t");
-			fprintf(stdout, "( ");
-			gsx_token_kind_fprint(stdout, token.kind);
-			fprintf(stdout, " `%.*s` )", (int)text.len, text.data);
+			print(ttyout, "%gsx_token%", token);
 			if (i + 1 < tokens.len)
-				fprintf(stdout, ", ");
+				print(ttyout, ", ");
 		}
-		fprintf(stdout, " }\n");
+		print(ttyout, "}\n");
 	}
 
 	struct gsx_ast*			syntax_tree = gsx_ast_parse(definitions, &tokens);
 	if (syntax_tree == NULL)
 		goto gsx_process_expression_return;
+	print(ttyout, "%gsx_ast%\n", syntax_tree);
 	production = gsx_process_ast(definitions, syntax_tree);
-	/* gsx_ast_print(stdout, syntax_tree, 0); */
 	gsx_ast_free(syntax_tree);
 
 gsx_process_expression_return:
@@ -1589,10 +1583,10 @@ bool				gsx_process_sections(struct dynamic_array* definitions, const struct dyn
 			ok = false;
 
 			struct view	text = view_trim(section.text, " \r\n\t");
-			fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Unterminated comment\n\t|\t", program_name);
-			if (text.len > 0) fprintf(stderr, "%.*s\n", (int)text.len, text.data);
-			else fprintf(stderr, "<empty text>\n");
-			fprintf(stderr, "\t|\n");
+			print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Unterminated comment\n\t|\t", program_name);
+			if (text.len > 0) print(ttyerr, "%view%\n", text);
+			else print(ttyerr, "<empty text>\n");
+			print(ttyerr, "\t|\n");
 			continue ;
 		}
 		struct gsx_box*	box = NULL;
@@ -1747,58 +1741,157 @@ void				gsx_free_definitions(struct dynamic_array* definitions) {
 	}
 }
 
+/*	GSX_Print_Format	*/
+
+void	_gsx_print_writer_token_kind(int fd, enum gsx_token_kind kind) {
+	switch (kind) {
+		case GSX_TOKEN_INTEGER: _print_writer_cstr(fd, "integer"); break ;
+		case GSX_TOKEN_STRING: _print_writer_cstr(fd, "string"); break ;
+		case GSX_TOKEN_INVALID: _print_writer_cstr(fd, "invalid"); break ;
+		case GSX_TOKEN_IDENT: _print_writer_cstr(fd, "identifier"); break ;
+		case GSX_TOKEN_CALL: _print_writer_cstr(fd, "function call"); break ;
+		case GSX_TOKEN_CHAR: _print_writer_cstr(fd, "character"); break ;
+		case GSX_TOKEN_ARRAY_OPEN: _print_writer_cstr(fd, "array open"); break ;
+		case GSX_TOKEN_ARRAY_CLOSE: _print_writer_cstr(fd, "array close"); break ;
+		case GSX_TOKEN_ARRAY_SEPARATOR: _print_writer_cstr(fd, "array separator"); break ;
+		case GSX_TOKEN_PARAMS_DELIMITER: _print_writer_cstr(fd, "parameters delimiter"); break ;
+		case GSX_TOKEN_DESTRUCTURE_SEPARATOR: _print_writer_cstr(fd, "destructure separator"); break ;
+		default: {
+			_print_writer_cstr(fd, "unknown (");
+			_print_writer_long(fd, (long)kind);
+			_print_writer_char(fd, ')');
+		} break ;
+	}
+}
+
+void	_gsx_print_writer_token(int fd, struct gsx_token token) {
+	_print_writer_cstr(fd, "{ token ");
+	_print_writer_view_alt(fd, token.text, '`');
+	_print_writer_char(fd, ' ');
+	_gsx_print_writer_token_kind(fd, token.kind);
+	_print_writer_cstr(fd, " }");
+}
+
+void	gsx_print_writer_token_kind(int fd, va_list args) {
+	enum gsx_token_kind	kind = va_arg(args, enum gsx_token_kind);
+	_gsx_print_writer_token_kind(fd, kind);
+}
+
+void	gsx_print_writer_token(int fd, va_list args) {
+	struct gsx_token	token = va_arg(args, struct gsx_token);
+	_gsx_print_writer_token(fd, token);
+}
+
+void	_gsx_print_writer_ast(int fd, struct gsx_ast* node, unsigned indent) {
+	if (node == NULL) {
+		if (indent == 0u) _print_writer_cstr(fd, "(ast::null)");
+		return ;
+	}
+
+	for (unsigned i = 0u; i < indent; ++i) print(fd, "\t");
+	switch (node->kind) {
+		case GSX_AST_CALL: {
+			struct gsx_ast_call*	call = node->data.call;
+			_print_writer_cstr(fd, "- call ");
+			_gsx_print_writer_token(fd, call->name);
+			_print_writer_char(fd, '\n');
+			for (size_t i = 0; i < call->args.len; ++i) {
+				struct gsx_ast*	node = da_at(struct gsx_ast*, &call->args, i);
+				_gsx_print_writer_ast(fd, node, indent + 1);
+			}
+		} break ;
+		case GSX_AST_DEFINE: {
+			struct gsx_ast_define*	define = node->data.define;
+			_print_writer_cstr(fd, "- define ");
+			_gsx_print_writer_token(fd, define->name);
+		} break ;
+		case GSX_AST_LITERAL: {
+			struct gsx_ast_literal*	literal = node->data.literal;
+			_print_writer_cstr(fd, "- literal ");
+			_gsx_print_writer_token(fd, literal->token);
+		} break ;
+		case GSX_AST_IDENT: {
+			struct gsx_ast_ident*	ident = node->data.ident;
+			_print_writer_cstr(fd, "- identifier ");
+			_gsx_print_writer_token(fd, ident->name);
+		} break ;
+		case GSX_AST_INVALID: {
+			_print_writer_cstr(fd, "- invalid");
+		} break ;
+		default: {
+			_print_writer_cstr(fd, "- unreachable");
+		} break ;
+	}
+}
+
+void	gsx_print_writer_ast(int fd, va_list args) {
+	struct gsx_ast*	node = va_arg(args, struct gsx_ast*);
+	_gsx_print_writer_ast(fd, node, 0u);
+}
+
+void	print_registery_init_gsx(void) {
+	static bool	gsx_print_init = false;
+	if (gsx_print_init) return ;
+
+	gsx_print_init = true;
+	print_definition_add(view_make_cstr_const("gsx_token"), gsx_print_writer_token);
+	print_definition_add(view_make_cstr_const("gsx_token_kind"), gsx_print_writer_token_kind);
+	print_definition_add(view_make_cstr_const("gsx_ast"), gsx_print_writer_ast);
+}
+
 /*	 Entry_Point	*/
 
 int		main(int argc, char **argv) {
-	print(FD_TTY_OUT, "Hello %cstr% %ulong% %#view% %% %dynamic_array%% world\n", "world!", ULONG_MAX, view_make_cstr_const("view data"));
 	program_name = argv[0];
 
 	if (argc != 3) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Incorrect number of arguments.\n", program_name);
-		fprintf(stderr, "\t"TERMINAL_NOTICE_USAGE": %s <in.gsx> <out.html>\n", program_name);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Incorrect number of arguments.\n", program_name);
+		print(ttyerr, "\t"TERMINAL_NOTICE_USAGE": %cstr% <in.gsx> <out.html>\n", program_name);
 		return (1);
 	}
-
 	const char*				file_in_path = argv[1];
+	const char*				file_out_path = argv[2];
+
 	if (!cstr_suffix(file_in_path, ".gsx")) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Invalid input file extension `%s`.\n", program_name, file_in_path);
-		fprintf(stderr, "\t"TERMINAL_NOTICE_USAGE": %s <in.gsx> <out.html>\n", program_name);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Invalid input file extension %#cstr%.\n", program_name, file_in_path);
+		print(ttyerr, "\t"TERMINAL_NOTICE_USAGE": %cstr% <in.gsx> <out.html>\n", program_name);
 		return (2);
 	}
-
-	const char*				file_out_path = argv[2];
 	if (cstr_equals(file_in_path, file_out_path)) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Reading and writing into the same file `%s` is not allowed.\n", program_name, file_out_path);
-		fprintf(stderr, "\t"TERMINAL_NOTICE_USAGE": %s \"%s\" <out.html>\n", program_name, file_in_path);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Reading and writing into the same file %#cstr% is not allowed.\n", program_name, file_out_path);
+		print(ttyerr, "\t"TERMINAL_NOTICE_USAGE": %cstr% %#cstr% <out.html>\n", program_name, file_in_path);
 		return (2);
 	}
 	if (!cstr_suffix(file_out_path, ".html")) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Invalid output file extension `%s`.\n", program_name, file_out_path);
-		fprintf(stderr, "\t"TERMINAL_NOTICE_USAGE": %s \"%s\" <out.html>\n", program_name, file_in_path);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Invalid output file extension %#cstr%.\n", program_name, file_out_path);
+		print(ttyerr, "\t"TERMINAL_NOTICE_USAGE": %cstr% \"%cstr%\" <out.html>\n", program_name, file_in_path);
 		return (2);
 	}
 
 	struct view			file_in_view = os_file_view(file_in_path);
 	if (file_in_view.data == NULL) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Could not read file `%s`.\n", program_name, file_in_path);
-		fprintf(stderr, "\t"TERMINAL_NOTICE_USAGE": %s <in.gsx> \"%s\"\n", program_name, file_out_path);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Could not read file %#cstr%.\n", program_name, file_in_path);
+		print(ttyerr, "\t"TERMINAL_NOTICE_USAGE": %cstr% <in.gsx> %`cstr%\n", program_name, file_out_path);
 		return (4);
 	}
+
+	print_registery_init();
+	print_registery_init_gsx();
 
 	struct dynamic_array	definitions = da_make(sizeof(struct gsx_definition));
 	gsx_init_definitions(&definitions);
 
 	struct dynamic_array	sections = da_make(sizeof(struct gsx_section));
 	if (!gsx_load_sections(file_in_view, &sections)) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": Invalid gsx file `%s`.\n", program_name, file_in_path);
-		fprintf(stderr, "\t"TERMINAL_NOTICE_HINT": Maybe the file has an unterminated comment somewhere?\n");
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": Invalid gsx file %#cstr%.\n", program_name, file_in_path);
+		print(ttyerr, "\t"TERMINAL_NOTICE_HINT": Maybe the file has an unterminated comment somewhere?\n");
 		program_return = 8;
 		goto sections_free;
 	}
 
 	struct dynamic_array	boxes = da_make(sizeof(struct gsx_box*));
 	if (!gsx_process_sections(&definitions, &sections, &boxes)) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": An error happened while processing `%s`.\n", program_name, file_in_path);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": An error happened while processing %#cstr%.\n", program_name, file_in_path);
 		program_return = 16;
 		goto boxes_free;
 	}
@@ -1819,18 +1912,17 @@ int		main(int argc, char **argv) {
 
 	struct view			file_out_view = string_builder_as_view(sb);
 	if (file_out_view.data == NULL) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": An error happened while generating output file content `%s`.\n", program_name, file_out_path);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": An error happened while generating output file content %#cstr%.\n", program_name, file_out_path);
 		program_return = 32;
 		goto builder_free;
 	}
 	if (!os_file_dump(file_out_path, file_out_view)) {
-		fprintf(stderr, "%s:\t"TERMINAL_NOTICE_ERROR": An error happened while generating output file content `%s`.\n", program_name, file_out_path);
-		const char *errno_text = strerror(errno);
-		fprintf(stderr, "\tDescription: %s\n", errno_text);
+		print(ttyerr, "%cstr%:\t"TERMINAL_NOTICE_ERROR": An error happened while generating output file content %#cstr%.\n", program_name, file_out_path);
+		print(ttyerr, "\tErrno: %errno%\n");
 		program_return = 32;
 		goto file_out_free;
 	}
-	fprintf(stdout, "%s:\t"TERMINAL_NOTICE_SUCCESS": Evaluated gsx template `%s` into %zu bytes written in `%s`.\n", program_name, file_in_path, file_out_view.len, file_out_path);
+	print(ttyout, "%cstr%:\t"TERMINAL_NOTICE_SUCCESS": Evaluated gsx template %#cstr% into %ulong% bytes written in %#cstr%.\n", program_name, file_in_path, file_out_view.len, file_out_path);
 
 file_out_free:
 	free(file_out_view.data);
