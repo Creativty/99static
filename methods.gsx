@@ -7,6 +7,7 @@
 <!-- gsx: 123 -->
 <!-- gsx: std/sum! 42 0 -->
 <!-- gsx: std/define! procs/debug_example () std/debug! "123" -->
+<!-- gsx: procs/debug! "hello" -->
 <!-- gsx: std/define! procs/debug_string () std/debug! consts/string -->
 <!-- gsx: std/define! procs/debug_arg (arg) std/debug! arg -->
 <!-- gsx: std/define! procs/debug_sum (lhs, rhs) std/debug! std/sum! lhs rhs -->
