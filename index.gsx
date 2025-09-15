@@ -1,10 +1,9 @@
-<!doctype html>
-<!-- _gsx: std/include! "methods.gsx" -->
+<!doctype html> <!-- gsx: std/include! "methods.gsx" -->
 <html>
 	<head>
-		<title><!-- gsx: std/TITLE --></title>
+		<title><!-- gsx: std/replace! std/TITLE "html" "gsx" --></title>
 	</head>
-	<body><!-- gsx: std/debug! "this is a debug message!" -->
+	<body>
 		<!-- gsx: std/include! "header.gsx" -->
 		<p><!-- gsx: "Hello world" --></p>
 		<p><!-- gsx: -1337 --></p>

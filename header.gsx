@@ -1,3 +1,3 @@
 <header>
-	<h1>Hello world</h1>
+	<!-- gsx: std/include! "title.gsx" -->
 </header>

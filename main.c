@@ -81,8 +81,17 @@ struct					gsx_section {
 	bool			is_comment;
 	bool			is_statement;
 	bool			is_terminated;
+
+	unsigned short	indent;
 };
-struct					gsx_template;
+struct					gsx_template {
+	const struct view		path;
+	const struct view		source; /* attr: read only mmap */
+	struct string_builder	output;
+
+	struct dynamic_array	statements; /* type: struct gsx_statement */
+	struct gsx_ast*			root;
+};
 struct					gsx_definition;
 struct					gsx_statement {
 	struct gsx_ast*			ast;
@@ -111,6 +120,7 @@ void					string_builder_write_long(struct string_builder*, long);
 void					string_builder_write_bool(struct string_builder*, bool);
 
 struct gsx_ast*			gsx_clone_ast(struct gsx_ast*);
+bool					gsx_vm_run_template(struct gsx_virtual_machine* vm, struct gsx_template* tmpl);
 
 /*	 Memory	*/
 
@@ -272,6 +282,23 @@ bool			view_suffix(const struct view string, const char* suffix) {
 	return (view_index_last(string, suffix) == ((int)string.len - length_suffix));
 }
 
+bool			view_split_iter(struct view* v, const char* sep, struct view* split) {
+	int	sep_len = cstr_length(sep);
+	if (v == NULL || split == NULL || sep_len == 0) return (false);
+	if (v->len == 0ul) return (false);
+
+	int	offset = view_index(*v, sep);
+	if (offset == -1) {
+		*split = *v;
+		*v = view_drop(*v, v->len);
+	}
+	else {
+		*split = view_take(*v, (size_t)(offset + sep_len));
+		*v = view_drop(*v, (size_t)(offset + sep_len));
+	}
+	return (true);
+}
+
 /*	 C_String	*/
 
 int		cstr_length(const char* str) {
@@ -392,8 +419,8 @@ long	cstr_conv_long(const char* str) {
 /*	 Dynamic_Array	*/
 
 #define da_at(TYPE, DA, INDEX) (((TYPE *)((DA)->items))[INDEX])
-#define da_first(TYPE, DA) (assert((DA)->len > 0ul && "cannot get first in an empty dynamic array"), (((TYPE *)((DA)->items))[0]))
-#define da_last(TYPE, DA) (assert((DA)->len > 0ul && "cannot get last in an empty dynamic array"), (((TYPE *)((DA)->items))[(DA)->len - 1ul]))
+#define da_first(TYPE, DA) (((TYPE *)((DA)->items))[assert((DA)->len >= 1ul && "cannot get first in an empty dynamic array"), 0])
+#define da_last(TYPE, DA) (((TYPE *)((DA)->items))[assert((DA)->len >= 1ul && "cannot get last in an empty dynamic array"), (DA)->len - 1ul])
 
 #define da_foreach_begin_index(NAME, INDEX, DA, TYPE) for (size_t INDEX = 0ul; INDEX < (DA)->len; ++INDEX) {\
 											TYPE	NAME = da_at(TYPE, DA, INDEX)
@@ -1502,6 +1529,150 @@ struct gsx_ast_param*			gsx_new_ast_param_named(struct view name, enum gsx_ast_p
 	return (param);
 }
 
+/*	GSX_Template	*/
+struct gsx_template		gsx_make_template(const struct view path, const struct view source) {
+	struct gsx_template	tmpl = {
+		.path = path,
+		.source = source,
+		.output = string_builder_make(),
+
+		.statements = da_make(sizeof(struct gsx_statement)),
+		.root = NULL,
+	};
+	return (tmpl);
+}
+
+void					gsx_destroy_template(struct gsx_template* tmpl) {
+	string_builder_destroy(&tmpl->output);
+
+	da_foreach_begin(statement, &tmpl->statements, struct gsx_statement);
+		da_free(&statement.tokens);
+		gsx_free_ast(statement.ast);
+	da_foreach_end();
+	da_free(&tmpl->statements);
+
+	mem_fill(tmpl, 0, sizeof(struct gsx_template));
+}
+
+void					gsx_split_template(struct gsx_template* tmpl) {
+	struct location			loc = {
+		.index = 0ul,
+		.line = 1ul,
+		.column = 1ul,
+		.path = tmpl->path,
+	};
+
+	unsigned short	indent = 0ul;
+	bool			indent_increment = true;
+	while (loc.index < tmpl->source.len) {
+		size_t					len = 0ul;
+		size_t					idx = loc.index;
+
+		struct view				source = view_drop(tmpl->source, loc.index);
+		struct location			location = { 0 };
+		struct gsx_section		section = {
+			.loc			= location,
+			.text			= { 0 },
+			.is_comment		= false,
+			.is_statement	= false,
+			.is_terminated	= false,
+
+			.indent			= indent,
+		};
+
+		mem_copy(&section.loc, &loc, sizeof(struct location));
+		if (view_prefix(source, "<!--")) {
+			section.is_comment = true;
+			for (size_t i = 0ul; i < 4ul; ++i) {
+				len++;
+				location_advance(&loc, tmpl->source.data[loc.index]);
+			}
+			while (loc.index < tmpl->source.len) {
+				struct view		view = view_drop(tmpl->source, loc.index);
+				section.is_statement = view_prefix(view, "gsx:");
+				if (section.is_statement || !cstr_contains_char(" \t\r\n", tmpl->source.data[loc.index])) break ;
+
+				len++;
+				location_advance(&loc, tmpl->source.data[loc.index]);
+			}
+			while (loc.index < tmpl->source.len) {
+				struct view		view = view_drop(tmpl->source, loc.index);
+
+				section.is_terminated = view_prefix(view, "-->");
+				if (section.is_terminated) {
+					location_advance(&loc, tmpl->source.data[loc.index]); len++;
+					location_advance(&loc, tmpl->source.data[loc.index]); len++;
+					location_advance(&loc, tmpl->source.data[loc.index]); len++;
+					break ;
+				}
+
+				len++;
+				location_advance(&loc, tmpl->source.data[loc.index]);
+			}
+		} else {
+			len = 0ul;
+			while (loc.index < tmpl->source.len) {
+				struct view	trailing = view_drop(tmpl->source, loc.index);
+				if (view_prefix(trailing, "<!--")) break ;
+
+				char c = source.data[len++];
+				if (c == '\n') {
+					indent = 0ul;
+					indent_increment = true;
+				} else if (c == '\t' && indent_increment) {
+					indent++;
+				} else {
+					indent = 0ul;
+					indent_increment = false;
+				}
+				location_advance(&loc, c);
+			}
+		}
+		section.text = view_drop_take(tmpl->source, idx, len);
+
+		struct gsx_statement	statement = {
+			.ast = NULL,
+			.tokens = da_make(sizeof(struct gsx_token)),
+			.section = section,
+		};
+		da_push(&tmpl->statements, &statement);
+	}
+}
+
+void					gsx_write_template_output(struct gsx_template* tmpl, struct gsx_section section, struct gsx_box* box) {
+	if (box == NULL) return ;
+
+	switch (box->kind) {
+		case GSX_BOX_CHAR: string_builder_write_char(&tmpl->output, box->data.character); break ;
+		case GSX_BOX_STRING: {
+			struct view	html = view_make_cstr(box->data.str);
+			struct view line = { 0 };
+			bool		must_indent = false;
+			while (view_split_iter(&html, "\n", &line)) {
+				if (must_indent) {
+					for (unsigned short i = 0; i < section.indent; ++i)
+						string_builder_write_char(&tmpl->output, '\t');
+				}
+				string_builder_write_view(&tmpl->output, line);
+				must_indent = section.is_statement;
+			}
+		} break ;
+		case GSX_BOX_INTEGER: string_builder_write_long(&tmpl->output, box->data.integer); break ;
+		case GSX_BOX_ARRAY: {
+			struct location loc = section.loc;
+			print(ttyerr, "%view%:%ulong%:%ulong%: " TERMINAL_NOTICE_TODO ": write_output(kind = ARRAY)\n", loc.path, loc.line, loc.column);
+		} break ;
+		case GSX_BOX_INVALID: {
+			struct location loc = section.loc;
+			print(ttyerr, "%view%:%ulong%:%ulong%: " TERMINAL_NOTICE_ERROR ": cannot write invalid box\n", loc.path, loc.line, loc.column);
+		} break ;
+		default: {
+			struct location loc = section.loc;
+			print(ttyerr, "%view%:%ulong%:%ulong%: " TERMINAL_NOTICE_ERROR ": cannot write unreachable box %int%\n", loc.path, loc.line, loc.column, (int)box->kind);
+		} break ;
+	}
+}
+
 /*	GSX_Internal	*/
 
 struct gsx_box*		gsx_internal_stub(struct gsx_virtual_machine* vm, struct dynamic_array* args) {
@@ -1524,9 +1695,31 @@ struct gsx_box*		gsx_internal_include(struct gsx_virtual_machine* vm, struct dyn
 	struct gsx_box*			ret = NULL;
 	struct gsx_box*			arg_path = da_at(struct gsx_box*, args, 0);
 	const char*				include_path = arg_path->data.str;
-	(void)vm;
-	(void)arg_path;
-	(void)include_path;
+
+	if (!cstr_suffix(include_path, ".gsx")) {
+		print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tinvalid file suffix %#cstr% during include call\n", program_name, include_path);
+		goto internal_include_ret;
+	}
+
+	const struct view		source = os_file_view(include_path);
+	if (source.data == NULL) {
+		print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tcould not view file %#cstr% because of: %errno%\n", program_name, include_path);
+		goto internal_include_ret;
+	}
+
+
+	const struct view		path = view_make_cstr_const(include_path);
+	struct gsx_template		tmpl = gsx_make_template(path, source);
+	if (!gsx_vm_run_template(vm, &tmpl)) {
+		print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tan error occured while including %#view%\n", program_name, path);
+		goto internal_include_ret;
+	}
+
+	struct view	output = string_builder_readonly_view(tmpl.output);
+	output = view_trim(output, "\r\n\t ");
+	if (output.len > 0ul)
+		ret = gsx_box_new_view(output);
+internal_include_ret:
 	return (ret);
 }
 
@@ -1822,132 +2015,6 @@ void					gsx_free_definitions(struct dynamic_array* definitions) {
 		gsx_definition_free(&def);
 	}
 	da_free(definitions);
-}
-
-/*	GSX_Template	*/
-struct gsx_template {
-	const struct view		path;
-	const struct view		source; /* attr: read only mmap */
-	struct string_builder	output;
-
-	struct dynamic_array	statements; /* type: struct gsx_statement */
-	struct gsx_ast*			root;
-};
-
-struct gsx_template		gsx_make_template(const struct view path, const struct view source) {
-	struct gsx_template	tmpl = {
-		.path = path,
-		.source = source,
-		.output = string_builder_make(),
-
-		.statements = da_make(sizeof(struct gsx_statement)),
-		.root = NULL,
-	};
-	return (tmpl);
-}
-
-void					gsx_destroy_template(struct gsx_template* tmpl) {
-	string_builder_destroy(&tmpl->output);
-
-	da_foreach_begin(statement, &tmpl->statements, struct gsx_statement);
-		da_free(&statement.tokens);
-		gsx_free_ast(statement.ast);
-	da_foreach_end();
-	da_free(&tmpl->statements);
-
-	mem_fill(tmpl, 0, sizeof(struct gsx_template));
-}
-
-void					gsx_split_template(struct gsx_template* tmpl) {
-	struct location			loc = {
-		.index = 0ul,
-		.line = 1ul,
-		.column = 1ul,
-		.path = tmpl->path,
-	};
-	while (loc.index < tmpl->source.len) {
-		size_t					len = 0ul;
-		size_t					idx = loc.index;
-
-		struct view				source = view_drop(tmpl->source, loc.index);
-		struct location			location = { 0 };
-		struct gsx_section		section = {
-			.loc			= location,
-			.text			= { 0 },
-			.is_comment		= false,
-			.is_statement	= false,
-			.is_terminated	= false,
-		};
-
-		mem_copy(&section.loc, &loc, sizeof(struct location));
-		if (view_prefix(source, "<!--")) {
-			section.is_comment = true;
-			for (size_t i = 0ul; i < 4ul; ++i) {
-				len++;
-				location_advance(&loc, tmpl->source.data[loc.index]);
-			}
-			while (loc.index < tmpl->source.len) {
-				struct view		view = view_drop(tmpl->source, loc.index);
-				section.is_statement = view_prefix(view, "gsx:");
-				if (section.is_statement || !cstr_contains_char(" \t\r\n", tmpl->source.data[loc.index])) break ;
-
-				len++;
-				location_advance(&loc, tmpl->source.data[loc.index]);
-			}
-			while (loc.index < tmpl->source.len) {
-				struct view		view = view_drop(tmpl->source, loc.index);
-
-				section.is_terminated = view_prefix(view, "-->");
-				if (section.is_terminated) {
-					location_advance(&loc, tmpl->source.data[loc.index]); len++;
-					location_advance(&loc, tmpl->source.data[loc.index]); len++;
-					location_advance(&loc, tmpl->source.data[loc.index]); len++;
-					break ;
-				}
-
-				len++;
-				location_advance(&loc, tmpl->source.data[loc.index]);
-			}
-		} else {
-			len = 0ul;
-			while (loc.index < tmpl->source.len) {
-				struct view	trailing = view_drop(tmpl->source, loc.index);
-				if (view_prefix(trailing, "<!--")) break ;
-
-				location_advance(&loc, source.data[len++]);
-			}
-		}
-		section.text = view_drop_take(tmpl->source, idx, len);
-
-		struct gsx_statement	statement = {
-			.ast = NULL,
-			.tokens = da_make(sizeof(struct gsx_token)),
-			.section = section,
-		};
-		da_push(&tmpl->statements, &statement);
-	}
-}
-
-void					gsx_write_template_output(struct gsx_template* tmpl, struct gsx_section section, struct gsx_box* box) {
-	if (box == NULL) return ;
-
-	switch (box->kind) {
-		case GSX_BOX_CHAR: string_builder_write_char(&tmpl->output, box->data.character); break ;
-		case GSX_BOX_STRING: string_builder_write_cstr(&tmpl->output, box->data.str); break ;
-		case GSX_BOX_INTEGER: string_builder_write_long(&tmpl->output, box->data.integer); break ;
-		case GSX_BOX_ARRAY: {
-			struct location loc = section.loc;
-			print(ttyerr, "%view%:%ulong%:%ulong%: " TERMINAL_NOTICE_TODO ": write_output(kind = ARRAY)\n", loc.path, loc.line, loc.column);
-		} break ;
-		case GSX_BOX_INVALID: {
-			struct location loc = section.loc;
-			print(ttyerr, "%view%:%ulong%:%ulong%: " TERMINAL_NOTICE_ERROR ": cannot write invalid box\n", loc.path, loc.line, loc.column);
-		} break ;
-		default: {
-			struct location loc = section.loc;
-			print(ttyerr, "%view%:%ulong%:%ulong%: " TERMINAL_NOTICE_ERROR ": cannot write unreachable box %int%\n", loc.path, loc.line, loc.column, (int)box->kind);
-		} break ;
-	}
 }
 
 /*	GSX_Neo_Parser */
@@ -2523,7 +2590,7 @@ bool						gsx_vm_load_entry(struct gsx_virtual_machine* vm, const char* tmpl_pat
 	const struct view			path = view_make_cstr_const(tmpl_path);
 	const struct view			source = os_file_view(tmpl_path);
 	if (source.data == NULL) {
-		print(ttyerr, "%cstr%: "TERMINAL_NOTICE_ERROR":\tcould not read file %#view%.\n", program_name, path);
+		print(ttyerr, "%cstr%: "TERMINAL_NOTICE_ERROR":\tcould not view file %#view% because of: %errno%.\n", program_name, path);
 		print(ttyerr, "\t"TERMINAL_NOTICE_USAGE": %cstr% <in.gsx> %#view%\n", program_name, path);
 		return (false);
 	}
@@ -2709,11 +2776,6 @@ bool						gsx_vm_interpret_template(struct gsx_virtual_machine* vm, struct gsx_t
 		gsx_write_template_output(tmpl, section, out);
 		gsx_box_free(out);
 	da_foreach_end();
-
-	struct view	out_raw = string_builder_readonly_view(tmpl->output);
-	struct view	out_trm = view_trim(out_raw, " \r\n\t");
-	print(ttyout, "output -> %ulong% bytes\n", out_trm.len);
-	print(ttyout, "%view%\n", out_trm);
 	return (vm->ok);
 }
 
@@ -2724,9 +2786,15 @@ bool						gsx_vm_run_template(struct gsx_virtual_machine* vm, struct gsx_templat
 
 bool						gsx_vm_run(struct gsx_virtual_machine* vm) {
 	assert(vm != NULL && "invalid vm passed to gsx_vm_run");
-
 	if (vm->template_entry == NULL) return (true);
-	return (gsx_vm_run_template(vm, vm->template_entry));
+
+	struct gsx_template*	tmpl = vm->template_entry;
+	if (!gsx_vm_run_template(vm, tmpl)) return (false);
+
+	struct view	out_raw = string_builder_readonly_view(tmpl->output);
+	struct view	out_trm = view_trim(out_raw, " \r\n\t");
+	print(ttyout, "%view%\n", out_trm);
+	return (true);
 }
 
 /*	 Entry_Point	*/
@@ -2767,33 +2835,4 @@ int		main(int argc, char **argv) {
 
 	gsx_vm_destroy(&vm);
 	return (program_return);
-// 	struct view			file_out_view = string_builder_as_view(sb);
-// 	if (file_out_view.data == NULL) {
-// 		print(ttyerr, "%cstr%: "TERMINAL_NOTICE_ERROR":\tan error happened while generating output file content %#cstr%.\n", program_name, file_out_path);
-// 		program_return = 32;
-// 		goto builder_free;
-// 	}
-// 	if (!os_file_dump(file_out_path, file_out_view)) {
-// 		print(ttyerr, "%cstr%: "TERMINAL_NOTICE_ERROR":\tan error happened while generating output file content %#cstr%.\n", program_name, file_out_path);
-// 		print(ttyerr, "\tErrno: %errno%\n");
-// 		program_return = 32;
-// 		goto file_out_free;
-// 	}
-// 	print(ttyout, "%cstr%: "TERMINAL_NOTICE_SUCCESS":\tevaluated gsx template %#cstr% into %ulong% bytes written in %#cstr%.\n", program_name, file_in_path, file_out_view.len, file_out_path);
-// 
-// file_out_free:
-// 	free(file_out_view.data);
-// builder_free:
-// 	string_builder_destroy(&sb);
-// boxes_free:
-// 	for (size_t i = 0; i < boxes.len; ++i) {
-// 		struct gsx_box*	box = da_at(struct gsx_box*, &boxes, i);
-// 		gsx_box_free(box);
-// 	}
-// 	da_free(&boxes);
-// sections_free:
-// 	da_free(&sections);
-// 
-// 	gsx_vm_free(&vm);
-// 	return (program_return);
 }
