@@ -114,9 +114,6 @@ void					string_builder_write_long(struct string_builder*, long);
 void					string_builder_write_bool(struct string_builder*, bool);
 
 struct gsx_ast*			gsx_clone_ast(struct gsx_ast*);
-struct gsx_ast*			gsx_parse_ast_generic(struct gsx_parser*);
-struct gsx_box*			gsx_interpret_ast(struct gsx_virtual_machine*, struct gsx_ast*);
-bool					gsx_interpret_sections(struct gsx_virtual_machine*, const struct dynamic_array*, struct dynamic_array*);
 
 /*	 Memory	*/
 
@@ -682,7 +679,7 @@ void						print_writer_long(int fd, va_list args) {
 }
 
 void						print_writer_char(int fd, va_list args) {
-	/* NOTE(xenobas): char is promoted to int when passed through ... */
+	/* NOTE(xenobas): char is promoted to int when passed through. */
 	char	c = (char)va_arg(args, int);
 	_print_writer_char(fd, c);
 }
@@ -2030,7 +2027,8 @@ bool					gsx_parse_neo_ast_define_param(struct gsx_parser* parser, struct dynami
 	struct gsx_ast_param*	param = NULL;
 	switch (token.kind) {
 		case GSX_TOKEN_IDENT: {
-			param = gsx_new_ast_param_named(token.text, GSX_PARAM_LITERAL, GSX_TYPE_STRING, NULL); /* TODO(xenobas): this all ident are strings shitshow must be fixed. */
+			/* TODO(xenobas): Implement type inference */
+			param = gsx_new_ast_param_named(token.text, GSX_PARAM_LITERAL, GSX_TYPE_STRING, NULL);
 		} break ;
 		case GSX_TOKEN_CHAR:
 		case GSX_TOKEN_STRING:
@@ -2307,11 +2305,11 @@ bool						gsx_vm_load_entry(struct gsx_virtual_machine* vm, const char* tmpl_pat
 struct gsx_box*				gsx_vm_interpret_ast(struct gsx_virtual_machine* vm, struct gsx_ast* ast) {
 	assert(vm != NULL && "invalid interpreter at gsx_interpret_ast");
 
-	PRINT_AST_INTERPRET_CALL("gsx_interpret_ast", ast);
 	if (ast == NULL) return (NULL);
 
 	switch (ast->kind) {
 		case GSX_AST_LITERAL: {
+			PRINT_AST_INTERPRET_CALL("vm_interpret_literal", ast);
 			struct gsx_ast_literal*	literal = ast->data.literal;
 			struct gsx_token		token = literal->token;
 			if (token.kind == GSX_TOKEN_CHAR)
@@ -2326,6 +2324,7 @@ struct gsx_box*				gsx_vm_interpret_ast(struct gsx_virtual_machine* vm, struct g
 			}
 		} break ;
 		case GSX_AST_IDENT: {
+			PRINT_AST_INTERPRET_CALL("vm_interpret_ident", ast);
 			struct gsx_ast_ident*	ident = ast->data.ident;
 			struct gsx_token		name = ident->name;
 			struct gsx_definition*	def = gsx_vm_get_definition(vm, name.text);
@@ -2336,6 +2335,7 @@ struct gsx_box*				gsx_vm_interpret_ast(struct gsx_virtual_machine* vm, struct g
 			return (gsx_vm_interpret_ast(vm, def->data.ast));
 		} break ;
 		case GSX_AST_LIST: {
+			PRINT_AST_INTERPRET_CALL("vm_interpret_list", ast);
 			struct gsx_ast_list*	list = ast->data.list;
 			struct dynamic_array	elems = list->elems;
 
@@ -2348,6 +2348,8 @@ struct gsx_box*				gsx_vm_interpret_ast(struct gsx_virtual_machine* vm, struct g
 			return (gsx_box_new_array(array));
 		} break ;
 		case GSX_AST_CALL: {
+			/* TODO(xenobas): Implement type checking */
+			PRINT_AST_INTERPRET_CALL("vm_interpret_call", ast);
 			struct gsx_ast_call*					ast_call = ast->data.call;
 			struct gsx_token						name = ast_call->name;
 			struct gsx_definition*					def = gsx_vm_get_definition(vm, name.text);
@@ -2385,7 +2387,6 @@ struct gsx_box*				gsx_vm_interpret_ast(struct gsx_virtual_machine* vm, struct g
 				for (size_t i = 0ul; i < ast_call->args.len; ++i) {
 					struct gsx_ast*			arg = da_at(struct gsx_ast*, &ast_call->args, i);
 					struct gsx_ast_param*	param = da_at(struct gsx_ast_param*, &def->params, i);
-					print(ttyout, "%cstr%: " TERMINAL_NOTICE_DEBUG ":\tpushing param name %#view% %addr%\n", program_name, param->name, param);/*  */
 					struct gsx_definition	def = gsx_definition_make_constant(param->name, arg);
 					da_push(&scope, &def);
 				}
@@ -2402,13 +2403,14 @@ struct gsx_box*				gsx_vm_interpret_ast(struct gsx_virtual_machine* vm, struct g
 			return (ret);
 		} break ;
 		case GSX_AST_DEFINE: {
+			/* TODO(xenobas): Implement type inference */
+			PRINT_AST_INTERPRET_CALL("vm_interpret_define", ast);
 			struct gsx_ast_define*			ast_def = ast->data.define;
 			struct view						name = ast_def->name.text;
 			if (ast_def->is_function) {
 				struct gsx_ast*				ast_val = ast_def->value;
 				struct dynamic_array		params = da_make(sizeof(struct gsx_ast_param*));
 				da_foreach_begin(ref_param, &ast_def->params, struct gsx_ast_param*);
-					print(ttyout, "%cstr%: " TERMINAL_NOTICE_DEBUG ":\tcloning parameter for a function : %#view%\n", program_name, ref_param->name);
 					struct gsx_ast_param*	param = gsx_new_ast_param_named(ref_param->name, ref_param->kind, ref_param->type, NULL);
 					da_push(&params, &param);
 				da_foreach_end();
@@ -2438,6 +2440,7 @@ struct gsx_box*				gsx_vm_interpret_ast(struct gsx_virtual_machine* vm, struct g
 		} break ;
 		case GSX_AST_INVALID:
 		default: {
+			PRINT_AST_INTERPRET_CALL("vm_interpret_unreachable", ast);
 			print(ttyerr, TERMINAL_NOTICE_ERROR ":\tcannot interpret invalid ast node %#gsx_ast%\n", ast);
 			return (NULL);
 		} break ;
@@ -2491,256 +2494,6 @@ bool						gsx_vm_run(struct gsx_virtual_machine* vm) {
 
 	if (vm->template_entry == NULL) return (true);
 	return (gsx_vm_run_template(vm, vm->template_entry));
-}
-
-/*	GSX_Interpret	*/
-
-struct gsx_box*		gsx_interpret_ast_literal(struct gsx_ast_literal* literal) {
-	assert(literal != NULL && "invalid pointer at gsx_interpret_ast_literal");
-
-	struct gsx_token	token = literal->token;
-	switch (token.kind) {
-		case GSX_TOKEN_CHAR: return (gsx_box_new_char(token.text.data[1]));
-		case GSX_TOKEN_STRING: return (gsx_box_new_view(view_make(token.text.data + 1, token.text.len - 2)));
-		case GSX_TOKEN_INTEGER: return (gsx_box_new_integer(view_conv_long(token.text)));
-
-		case GSX_TOKEN_SQUARE_OPEN:
-		case GSX_TOKEN_SQUARE_CLOSE:
-		case GSX_TOKEN_PAREN_OPEN:
-		case GSX_TOKEN_PAREN_CLOSE:
-		case GSX_TOKEN_HTML_OPEN:
-		case GSX_TOKEN_HTML_CLOSE:
-		case GSX_TOKEN_HTML_SIGNATURE:
-		case GSX_TOKEN_CALL:
-		case GSX_TOKEN_COMMA:
-		case GSX_TOKEN_COLON:
-		case GSX_TOKEN_IDENT:
-		case GSX_TOKEN_INVALID:
-		default: return (NULL);
-	}
-}
-
-struct gsx_box*		gsx_interpret_ast_ident(struct gsx_virtual_machine* vm, struct gsx_ast_ident* ident) {
-	assert(vm != NULL && ident != NULL && "invalid pointer at gsx_interpret_ast_ident");
-
-	struct view				text = ident->name.text;
-	struct gsx_definition*	def = gsx_vm_get_definition(vm, text);
-	if (def != NULL) return (gsx_interpret_ast(vm, def->data.ast));
-
-	print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tundeclared identifier %#view%\n", program_name, text);
-	return (NULL);
-}
-
-struct gsx_box*		gsx_interpret_ast_call(struct gsx_virtual_machine* vm, struct gsx_ast_call* call) {
-	assert(vm != NULL && call != NULL && "invalid pointer at gsx_interpret_ast_call");
-
-	struct view									text = call->name.text;
-	struct dynamic_array						args = call->args;
-	struct gsx_box*								retval = NULL;
-	struct gsx_definition*						definition = gsx_vm_get_definition(vm, text);
-	if (definition == NULL) {
-		print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tcalled undeclared function %#view%\n", program_name, text);
-		goto gsx_interpret_ast_call_return;
-	}
-
-	enum gsx_definition_kind					kind = definition->kind;
-	struct dynamic_array						params = definition->params;
-	if (params.len != args.len) {
-		print(ttyerr, "%cstr%: "TERMINAL_NOTICE_ERROR":\tincorrect number of arguments passed to function %#view%\n", program_name, text);
-		print(ttyerr, "\tExpected %ulong% parameters, got %ulong% arguments instead.\n", params.len, args.len);
-		goto gsx_interpret_ast_call_return;
-	}
-	switch (kind) {
-		case GSX_DEFINITION_FUNCTION: {
-			retval = gsx_interpret_ast(vm, definition->data.ast);
-		} break ;
-		case GSX_DEFINITION_INTERNAL_FUNCTION: {
-			gsx_definition_internal				function = definition->data.internal;
-			if (function == NULL) {
-				print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tunimplemented internal function %#view%.\n", program_name, text);
-				print(ttyerr, "\tQuestion: How did you even get here?\n");
-				goto gsx_interpret_ast_call_return;
-			}
-
-			bool								args_ok = true;
-			struct dynamic_array				args_boxed = da_make(sizeof(struct gsx_box*));
-			for (size_t i = 0ul; i < args.len; ++i) {
-				struct gsx_ast*					ast = da_at(struct gsx_ast*, &args, i);
-				struct gsx_box*					box = gsx_interpret_ast(vm, ast);
-				enum gsx_type					type = gsx_type_of_box(box);
-				struct gsx_ast_param*			param = da_at(struct gsx_ast_param*, &params, i);
-
-				if (type == GSX_TYPE_VOID) {
-					gsx_box_free(box);
-					print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tillegal passing of void value to %#view% at the %nth% argument.\n", program_name, text, i + 1);
-					args_ok = false;
-					continue ;
-				}
-				else if (type != param->type) {
-					gsx_box_free(box);
-					print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\texpected %nth% argument to have type %gsx_type%, got %gsx_type% during call to function %#view%.\n", program_name, i + 1ul, param->type, type, text);
-					args_ok = false;
-					continue ;
-				}
-				else da_push(&args_boxed, &box);
-			}
-			if (!args_ok) {
-				for (size_t i = 0ul; i < args_boxed.len; ++i) {
-					struct gsx_box*	box = da_at(struct gsx_box*, &args_boxed, i);
-					gsx_box_free(box);
-				}
-				da_free(&args_boxed);
-				goto gsx_interpret_ast_call_return;
-			}
-
-			retval = function(NULL, &args_boxed);
-			for (size_t i = 0ul; i < args_boxed.len; ++i) {
-				struct gsx_box*					box = da_at(struct gsx_box*, &args_boxed, i);
-				gsx_box_free(box);
-			}
-			da_free(&args_boxed);
-		} break ;
-		case GSX_DEFINITION_INTERNAL_CONSTANT:
-		case GSX_DEFINITION_CONSTANT: {
-			print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tcannot call constant %#view% as if it was a function\n", program_name, text);
-			print(ttyerr, "\tQuestion: How did you even get here?\n");
-			goto gsx_interpret_ast_call_return;
-		} break ;
-		case GSX_DEFINITION_INVALID: {
-			print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tcalled function %#view% with invalid registered definition.\n", program_name, text);
-			print(ttyerr, "\tQuestion: How did you even get here?\n");
-			goto gsx_interpret_ast_call_return;
-		} break ;
-		default: {
-			print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tcalled function %#view% with unreachable registered definition.\n", program_name, text);
-			print(ttyerr, "\tQuestion: How did you even get here?\n");
-			goto gsx_interpret_ast_call_return;
-		} break ;
-	}
-
-gsx_interpret_ast_call_return:
-	return (retval);
-}
-
-struct gsx_box*		gsx_interpret_ast_define(struct gsx_virtual_machine* vm, struct gsx_ast_define* ast) {
-	assert(vm != NULL && ast != NULL && "invalid pointer at gsx_interpret_ast_define");
-
-	struct view				name = ast->name.text;
-	if (view_prefix(name, "std/")) {
-		print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tcannot add definition %#view%! to reserved collection \"std\"\n", program_name, name);
-		return (NULL);
-	}
-
-	struct gsx_definition*	predef = gsx_definition_get(&vm->definitions, name);
-	if (predef != NULL) {
-		print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tcannot redefine already existing %gsx_definition_kind% %#view%\n", program_name, predef->kind, name);
-		if (predef->kind == GSX_DEFINITION_FUNCTION)
-			print(ttyerr, "\t" TERMINAL_NOTICE_HINT ":\tif you mean to overload/pattern match, it will be supported later.\n");
-		return (NULL);
-	}
-
-	enum gsx_definition_kind	kind = ast->is_function ? GSX_DEFINITION_FUNCTION : GSX_DEFINITION_CONSTANT;
-	struct gsx_ast*				val = gsx_clone_ast(ast->value);
-	struct gsx_definition		def = gsx_definition_make_user_value(kind, name, ast->params, val);
-	return (gsx_definition_push(&vm->definitions, def), NULL);
-}
-
-struct gsx_box*		gsx_interpret_ast(struct gsx_virtual_machine* vm, struct gsx_ast* ast) {
-	assert(vm != NULL && "invalid interpreter at gsx_interpret_ast");
-
-	PRINT_AST_INTERPRET_CALL("gsx_interpret_ast", ast);
-	if (ast == NULL) return (NULL);
-
-	if (ast->kind == GSX_AST_LITERAL) return (gsx_interpret_ast_literal(ast->data.literal));
-	if (ast->kind == GSX_AST_IDENT) return (gsx_interpret_ast_ident(vm, ast->data.ident));
-	if (ast->kind == GSX_AST_CALL) return (gsx_interpret_ast_call(vm, ast->data.call));
-	if (ast->kind == GSX_AST_DEFINE) return (gsx_interpret_ast_define(vm, ast->data.define));
-	return (NULL);
-}
-
-struct gsx_box*		gsx_interpret_expression(struct gsx_virtual_machine* vm, struct view comment) {
-	assert(vm != NULL && "invalid interpreter passed to gsx_interpret_expression");
-	assert(comment.len > 0ul && "invalid comment passed to gsx_interpret_expression");
-
-	struct view	expression = comment;
-	expression = view_drop(expression, cstr_length("<!--"));
-	expression = view_take(expression, expression.len - cstr_length("-->"));
-	/* TODO(xenobas): Handle this mess post tokenization not during processing of raw strings. */
-	expression = view_trim(expression, " \t");
-	for (size_t i = 0; i < expression.len; ++i) { /* NOTE(xenobas): Do not allow for multiline expressions... for now that is. */
-		if (expression.data[i] == '\n') {
-			struct view	text = view_trim(expression, " \r\n\t");
-			print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tunsupported multiline gsx comment\n\t|\t", program_name);
-			if (text.len > 0) print(ttyerr, "%view%\n", text);
-			else print(ttyerr, "<empty comment>\n");
-			print(ttyerr, "\t|\n");
-			return (NULL);
-		}
-	}
-	expression = view_drop(expression, cstr_length("gsx:"));
-	expression = view_trim(expression, " \t");
-
-	return (NULL);
-/*
-	struct gsx_box*			production = NULL;
-	struct dynamic_array	tokens = da_make(sizeof(struct gsx_token));
-	if (!gsx_lexer_tokenize(expression, &tokens)) {
-		for (size_t i = 0; i < tokens.len; ++i) {
-			struct gsx_token	token = da_at(struct gsx_token, &tokens, i);
-
-			token.text = view_trim(token.text, " \n\r\t");
-			print(ttyerr, "%gsx_token%\n", token);
-		}
-		goto gsx_interpret_expression_return;
-	}
-	if (false) {
-		print(ttyout, "tokens = { ");
-		for (size_t i = 0; i < tokens.len; ++i) {
-			struct gsx_token	token = da_at(struct gsx_token, &tokens, i);
-			print(ttyout, "%gsx_token%", token);
-			if (i + 1 < tokens.len)
-				print(ttyout, ", ");
-		}
-		print(ttyout, "}\n");
-	}
-
-	struct gsx_ast*			syntax_tree = gsx_parse_ast(&vm->definitions, &tokens);
-	if (syntax_tree == NULL) goto gsx_interpret_expression_return;
-	production = gsx_interpret_ast(vm, syntax_tree);
-	gsx_free_ast(syntax_tree);
-
-gsx_interpret_expression_return:
-	da_free(&tokens);
-	return (production);
-*/
-}
-
-bool				gsx_interpret_sections(struct gsx_virtual_machine* vm, const struct dynamic_array* sections, struct dynamic_array* boxes) {
-	assert((sections != NULL && boxes != NULL) && "Invalid arguments passed to gsx_interpret_sections");
-
-	bool					ok = true;
-	for (int i = 0; i < (int)sections->len; ++i) {
-		struct gsx_section	section = da_at(struct gsx_section, sections, i);
-		if (section.is_comment && !section.is_terminated) {
-			ok = false;
-
-			struct view	text = view_trim(section.text, " \r\n\t");
-			print(ttyerr, "%cstr%: " TERMINAL_NOTICE_ERROR ":\tunterminated comment\n\t|\t", program_name);
-			if (text.len > 0) print(ttyerr, "%view%\n", text);
-			else print(ttyerr, "<empty text>\n");
-			print(ttyerr, "\t|\n");
-			continue ;
-		}
-		struct gsx_box*	box = NULL;
-		if (section.is_statement) {
-			box = gsx_interpret_expression(vm, section.text);
-		} else if (!section.is_comment) {
-			box = gsx_box_new_view(section.text);
-			ok = (ok && (box != NULL));
-		}
-		if (box != NULL) da_push(boxes, &box);
-	}
-	return (ok);
 }
 
 /*	GSX_Print_Format	*/
