@@ -10,7 +10,11 @@
 <!-- gsx: procs/debug! "hello" -->
 <!-- gsx: std/define! procs/debug_string () std/debug! consts/string -->
 <!-- gsx: std/define! procs/debug_arg (arg) std/debug! arg -->
+<!-- gsx: procs/debug_arg! "debug_arg" -->
 <!-- gsx: std/define! procs/debug_sum (lhs, rhs) std/debug! std/sum! lhs rhs -->
+
+<!-- gsx: std/define! procs/rot_13 (arg) std/mod! std/sum! arg 13 26 -->
+<!-- gsx: procs/rot_13! 25 -->
 
 
 <!-- TODO(xenobas): Design conditionals -->
