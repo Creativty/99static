@@ -17,6 +17,21 @@
  * This requires two machines to solve it, but should provide better interface for interpreting?
 */
 
+/*	Compile time options	*/
+#ifdef DEBUG_AST_PARSE_CALLS
+#define PRINT_AST_PARSE_CALL(NAME, TOKEN) print(ttyout, "%cstr%: %int%: PARSE_CALL: " NAME " <- %gsx_token%\n", __FILE__, __LINE__, (TOKEN));
+#else
+#define PRINT_AST_PARSE_CALL(NAME, TOKEN) ((void)(NAME), (void)(TOKEN))
+#endif
+
+#ifdef DEBUG_AST_INTERPRET_CALLS
+#define PRINT_AST_INTERPRET_CALL(NAME, AST) print(ttyout, "%cstr%: %int%: INTERPRET_CALL: " NAME " <- %#gsx_ast%\n", __FILE__, __LINE__, (AST));
+#else
+#define PRINT_AST_INTERPRET_CALL(NAME, AST) ((void)(NAME), (void)(AST))
+#endif
+
+/*	Terminal	*/
+
 /* REFERENCE(xenobas): [ANSI Escape Codes](https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797)*/
 #define TERMINAL_COLOR_RED "\x1b[1;31m"
 #define TERMINAL_COLOR_GREEN "\x1b[1;32m"
@@ -30,24 +45,6 @@
 #define TERMINAL_NOTICE_HINT TERMINAL_COLOR_WHITE "hint" TERMINAL_STYLE_RESET
 #define TERMINAL_NOTICE_USAGE TERMINAL_COLOR_WHITE "usage" TERMINAL_STYLE_RESET
 #define TERMINAL_NOTICE_DEBUG TERMINAL_COLOR_WHITE "debug" TERMINAL_STYLE_RESET
-
-#define _STRINGIFY(X) #X
-#define STRINGIFY(X) _STRINGIFY(X)
-
-#define ttyout ((int)1)
-#define ttyerr ((int)2)
-
-#ifdef DEBUG_AST_PARSE_CALLS
-#define PRINT_AST_PARSE_CALL(NAME, TOKEN) print(ttyout, "%cstr%: %int%: PARSE_CALL: " NAME " <- %gsx_token%\n", __FILE__, __LINE__, (TOKEN));
-#else
-#define PRINT_AST_PARSE_CALL(NAME, TOKEN) ((void)(NAME), (void)(TOKEN))
-#endif
-
-#ifdef DEBUG_AST_INTERPRET_CALLS
-#define PRINT_AST_INTERPRET_CALL(NAME, AST) print(ttyout, "%cstr%: %int%: INTERPRET_CALL: " NAME " <- %#gsx_ast%\n", __FILE__, __LINE__, (AST));
-#else
-#define PRINT_AST_INTERPRET_CALL(NAME, AST) ((void)(NAME), (void)(AST))
-#endif
 
 /*	 Program	*/
 
@@ -550,6 +547,9 @@ void					string_builder_write_bool(struct string_builder* sb, bool b) {
 #define PRINT_LEADER '%'
 #define PRINT_SYMBOL_SET "#_abcdefghijklmnopqrstuvwxyz0123456789"
 #define PRINT_REGISTERY_CAPACITY 32ul
+
+#define ttyout ((int)1)
+#define ttyerr ((int)2)
 
 typedef void				(*print_writer)(int, va_list);
 
@@ -1434,6 +1434,19 @@ struct gsx_ast*					gsx_clone_ast(struct gsx_ast* ref) {
 	}
 }
 
+void							gsx_free_ast_param(struct gsx_ast_param* param) {
+	if (param == NULL) return ;
+
+	switch (param->kind) {
+		case GSX_PARAM_DESTRUCTURE: /* TODO(xenobas): free the param->destructure */ break ;
+		case GSX_PARAM_IDENT:
+		case GSX_PARAM_LITERAL:
+		case GSX_PARAM_INVALID:
+		default: break ;
+	}
+	free(param);
+}
+
 void							gsx_free_ast(struct gsx_ast* node) {
 	if (node == NULL) return ;
 	switch (node->kind) {
@@ -1453,6 +1466,9 @@ void							gsx_free_ast(struct gsx_ast* node) {
 		} break ;
 		case GSX_AST_DEFINE: {
 			struct gsx_ast_define*	define = node->data.define;
+			da_foreach_begin(param, &define->params, struct gsx_ast_param*);
+				gsx_free_ast_param(param);
+			da_foreach_end();
 			da_free(&define->params);
 			gsx_free_ast(define->value);
 		} break ;
@@ -1484,19 +1500,6 @@ struct gsx_ast_param*			gsx_new_ast_param_named(struct view name, enum gsx_ast_p
 		param->destructure = destructure;
 	}
 	return (param);
-}
-
-void							gsx_free_ast_param(struct gsx_ast_param* param) {
-	if (param == NULL) return ;
-
-	switch (param->kind) {
-		case GSX_PARAM_DESTRUCTURE: /* TODO(xenobas): free the param->destructure */ break ;
-		case GSX_PARAM_IDENT:
-		case GSX_PARAM_LITERAL:
-		case GSX_PARAM_INVALID:
-		default: break ;
-	}
-	free(param);
 }
 
 /*	GSX_Internal	*/
@@ -1695,9 +1698,13 @@ void					gsx_definition_free(struct gsx_definition* def) {
 		case GSX_DEFINITION_INTERNAL_CONSTANT: {
 			gsx_free_ast(def->data.ast);
 		} break ;
+		case GSX_DEFINITION_FUNCTION: {
+			da_foreach_begin(param, &def->params, struct gsx_ast_param*);
+				gsx_free_ast_param(param);
+			da_foreach_end();
+		} break ;
 		case GSX_DEFINITION_INVALID:
 		case GSX_DEFINITION_CONSTANT:
-		case GSX_DEFINITION_FUNCTION:
 		default: break ;
 	}
 	da_free(&def->params);
@@ -2188,6 +2195,231 @@ struct gsx_ast*			gsx_parse_neo_ast_statement(struct gsx_virtual_machine* vm, st
 	return (ast);
 }
 
+/*	GSX_Print_Format	*/
+
+void	_gsx_print_writer_token_kind(int fd, enum gsx_token_kind kind) {
+	switch (kind) {
+		case GSX_TOKEN_INTEGER: _print_writer_cstr(fd, "integer"); break ;
+		case GSX_TOKEN_STRING: _print_writer_cstr(fd, "string"); break ;
+		case GSX_TOKEN_INVALID: _print_writer_cstr(fd, "invalid"); break ;
+		case GSX_TOKEN_IDENT: _print_writer_cstr(fd, "identifier"); break ;
+		case GSX_TOKEN_CALL: _print_writer_cstr(fd, "function call"); break ;
+		case GSX_TOKEN_CHAR: _print_writer_cstr(fd, "character"); break ;
+		case GSX_TOKEN_SQUARE_OPEN: _print_writer_cstr(fd, "array open"); break ;
+		case GSX_TOKEN_SQUARE_CLOSE: _print_writer_cstr(fd, "array close"); break ;
+		case GSX_TOKEN_PAREN_OPEN: _print_writer_cstr(fd, "parameters open"); break ;
+		case GSX_TOKEN_PAREN_CLOSE: _print_writer_cstr(fd, "parameters close"); break ;
+		case GSX_TOKEN_COMMA: _print_writer_cstr(fd, "comma"); break ;
+		case GSX_TOKEN_COLON: _print_writer_cstr(fd, "colon"); break ;
+		case GSX_TOKEN_HTML_OPEN: _print_writer_cstr(fd, "html open"); break ;
+		case GSX_TOKEN_HTML_CLOSE: _print_writer_cstr(fd, "html close"); break ;
+		case GSX_TOKEN_HTML_SIGNATURE: _print_writer_cstr(fd, "html gsx signature"); break ;
+		default: {
+			_print_writer_cstr(fd, "unreachable (");
+			_print_writer_long(fd, (long)kind);
+			_print_writer_char(fd, ')');
+		} break ;
+	}
+}
+
+void	_gsx_print_writer_token(int fd, struct gsx_token token) {
+	_print_writer_cstr(fd, "{ token ");
+	_print_writer_view_alt(fd, token.text);
+	_print_writer_char(fd, ' ');
+	_gsx_print_writer_token_kind(fd, token.kind);
+	_print_writer_cstr(fd, " }");
+}
+
+void	_gsx_print_writer_ast(int fd, struct gsx_ast* node, unsigned indent) {
+	if (node == NULL) {
+		if (indent == 0u) _print_writer_cstr(fd, "(ast::null)");
+		return ;
+	}
+
+	for (unsigned i = 0u; i < indent; ++i) print(fd, "\t");
+	switch (node->kind) {
+		case GSX_AST_LIST: {
+			struct gsx_ast_list*	list = node->data.list;
+			_print_writer_cstr(fd, "- list with ");
+			_print_writer_ulong(fd, list->elems.len);
+			_print_writer_cstr(fd, " elements");
+		} break ;
+		case GSX_AST_CALL: {
+			struct gsx_ast_call*	call = node->data.call;
+			_print_writer_cstr(fd, "- call ");
+			_gsx_print_writer_token(fd, call->name);
+			_print_writer_char(fd, '\n');
+			da_foreach_begin(node, &call->args, struct gsx_ast*);
+				_gsx_print_writer_ast(fd, node, indent + 1);
+			da_foreach_end();
+		} break ;
+		case GSX_AST_DEFINE: {
+			struct gsx_ast_define*	define = node->data.define;
+			_print_writer_cstr(fd, "- define ");
+			_gsx_print_writer_token(fd, define->name);
+		} break ;
+		case GSX_AST_LITERAL: {
+			struct gsx_ast_literal*	literal = node->data.literal;
+			_print_writer_cstr(fd, "- literal ");
+			_gsx_print_writer_token(fd, literal->token);
+		} break ;
+		case GSX_AST_IDENT: {
+			struct gsx_ast_ident*	ident = node->data.ident;
+			_print_writer_cstr(fd, "- identifier ");
+			_gsx_print_writer_token(fd, ident->name);
+		} break ;
+		case GSX_AST_INVALID: {
+			_print_writer_cstr(fd, "- invalid");
+		} break ;
+		default: {
+			_print_writer_cstr(fd, "- unreachable");
+		} break ;
+	}
+}
+
+void	_gsx_print_writer_ast_alt(int fd, struct gsx_ast* node) {
+	if (node == NULL) {
+		_print_writer_cstr(fd, "{ ast null }");
+		return ;
+	}
+
+	switch (node->kind) {
+		case GSX_AST_LIST: {
+			struct gsx_ast_list*	list = node->data.list;
+
+			_print_writer_cstr(fd, "{ ast ");
+			_print_writer_ulong(fd, list->elems.len);
+			_print_writer_cstr(fd, " elements list }");
+		} break ;
+		case GSX_AST_CALL: {
+			struct gsx_ast_call*	call = node->data.call;
+
+			_print_writer_cstr(fd, "{ call ");
+			_print_writer_view_alt(fd, call->name.text);
+			_print_writer_cstr(fd, " with ");
+			_print_writer_ulong(fd, call->args.len);
+			_print_writer_cstr(fd, " arguments }");
+		} break ;
+		case GSX_AST_DEFINE: {
+			struct gsx_ast_define*	define = node->data.define;
+
+			_print_writer_cstr(fd, "{ define ");
+			_print_writer_view_alt(fd, define->name.text);
+			_print_writer_cstr(fd, define->is_function ? " as a function that accepts " : " as a constant ");
+			if (define->is_function) {
+				_print_writer_ulong(fd, define->params.len);
+				_print_writer_cstr(fd, " parameters via ");
+			} else _print_writer_cstr(fd, "via ");
+			_gsx_print_writer_ast_alt(fd, define->value);
+			_print_writer_cstr(fd, " }");
+		} break ;
+		case GSX_AST_LITERAL: {
+			struct gsx_ast_literal*	literal = node->data.literal;
+
+			_print_writer_cstr(fd, "{ literal ");
+			_print_writer_view_alt(fd, literal->token.text);
+			_print_writer_cstr(fd, " }");
+		} break ;
+		case GSX_AST_IDENT: {
+			struct gsx_ast_ident*	ident = node->data.ident;
+
+			_print_writer_cstr(fd, "{ identifier ");
+			_print_writer_view_alt(fd, ident->name.text);
+			_print_writer_cstr(fd, " }");
+		} break ;
+		case GSX_AST_INVALID: {
+			_print_writer_cstr(fd, "{ invalid ");
+			_print_writer_addr(fd, (unsigned long)node);
+			_print_writer_cstr(fd, " }");
+		} break ;
+		default: {
+			_print_writer_cstr(fd, "{ unreachable }");
+		} break ;
+	}
+}
+
+void	_gsx_print_writer_type(int fd, enum gsx_type type) {
+	switch (type) {
+		case GSX_TYPE_CHAR: _print_writer_cstr(fd, "char"); break ;
+		case GSX_TYPE_INTEGER: _print_writer_cstr(fd, "integer"); break ;
+		case GSX_TYPE_STRING: _print_writer_cstr(fd, "string"); break ;
+		case GSX_TYPE_ARRAY: _print_writer_cstr(fd, "array"); break ;
+		case GSX_TYPE_VOID: _print_writer_cstr(fd, "void"); break ;
+		case GSX_TYPE_INVALID: _print_writer_cstr(fd, "invalid"); break ;
+		default: _print_writer_cstr(fd, "unreachable"); break ;
+	}
+}
+
+void	_gsx_print_writer_definition_kind(int fd, enum gsx_definition_kind kind) {
+	switch (kind) {
+		case GSX_DEFINITION_CONSTANT: _print_writer_cstr(fd, "user constant"); break ;
+		case GSX_DEFINITION_FUNCTION: _print_writer_cstr(fd, "user function"); break ;
+		case GSX_DEFINITION_INTERNAL_CONSTANT: _print_writer_cstr(fd, "internal constant"); break ;
+		case GSX_DEFINITION_INTERNAL_FUNCTION: _print_writer_cstr(fd, "internal function"); break ;
+		case GSX_DEFINITION_INVALID: _print_writer_cstr(fd, "invalid"); break ;
+		default: _print_writer_cstr(fd, "unreachable"); break ;
+	}
+}
+
+void	_gsx_print_writer_ast_param_kind(int fd, enum gsx_ast_param_kind kind) {
+	switch (kind) {
+		case GSX_PARAM_DESTRUCTURE: _print_writer_cstr(fd, "destructure"); break ;
+		case GSX_PARAM_IDENT: _print_writer_cstr(fd, "identifier"); break ;
+		case GSX_PARAM_LITERAL: _print_writer_cstr(fd, "literal"); break ;
+		case GSX_PARAM_INVALID: _print_writer_cstr(fd, "invalid"); break ;
+		default: _print_writer_cstr(fd, "unreachable"); break ;
+	}
+}
+
+void	gsx_print_writer_token_kind(int fd, va_list args) {
+	enum gsx_token_kind	kind = va_arg(args, enum gsx_token_kind);
+	_gsx_print_writer_token_kind(fd, kind);
+}
+
+void	gsx_print_writer_token(int fd, va_list args) {
+	struct gsx_token	token = va_arg(args, struct gsx_token);
+	_gsx_print_writer_token(fd, token);
+}
+
+void	gsx_print_writer_ast(int fd, va_list args) {
+	struct gsx_ast*	node = va_arg(args, struct gsx_ast*);
+	_gsx_print_writer_ast(fd, node, 0u);
+}
+
+void	gsx_print_writer_ast_alt(int fd, va_list args) {
+	struct gsx_ast*	node = va_arg(args, struct gsx_ast*);
+	_gsx_print_writer_ast_alt(fd, node);
+}
+
+void	gsx_print_writer_type(int fd, va_list args) {
+	enum gsx_type	type = va_arg(args, enum gsx_type);
+	_gsx_print_writer_type(fd, type);
+}
+
+void	gsx_print_writer_definition_kind(int fd, va_list args) {
+	enum gsx_definition_kind	kind = va_arg(args, enum gsx_definition_kind);
+	_gsx_print_writer_definition_kind(fd, kind);
+}
+
+void	gsx_print_writer_ast_param_kind(int fd, va_list args) {
+	enum gsx_ast_param_kind	kind = va_arg(args, enum gsx_ast_param_kind);
+	_gsx_print_writer_ast_param_kind(fd, kind);
+}
+
+void	print_registery_init_gsx(void) {
+	static bool	gsx_print_init = false;
+	if (gsx_print_init) return ;
+
+	gsx_print_init = true;
+	print_definition_add(view_make_cstr_const("gsx_ast"), gsx_print_writer_ast);
+	print_definition_add(view_make_cstr_const("#gsx_ast"), gsx_print_writer_ast_alt);
+	print_definition_add(view_make_cstr_const("gsx_ast_param_kind"), gsx_print_writer_ast_param_kind);
+	print_definition_add(view_make_cstr_const("gsx_type"), gsx_print_writer_type);
+	print_definition_add(view_make_cstr_const("gsx_token"), gsx_print_writer_token);
+	print_definition_add(view_make_cstr_const("gsx_token_kind"), gsx_print_writer_token_kind);
+	print_definition_add(view_make_cstr_const("gsx_definition_kind"), gsx_print_writer_definition_kind);
+}
+
 /*	 GSX_Virtual_Machine	*/
 
 struct gsx_virtual_machine	gsx_vm_make(void) {
@@ -2207,11 +2439,12 @@ struct gsx_virtual_machine	gsx_vm_make(void) {
 void						gsx_vm_destroy(struct gsx_virtual_machine* vm) {
 	if (vm == NULL) return ;
 
-	da_foreach_begin_index_ref(scope, _scope_index, &vm->scopes, struct dynamic_array);
-		da_foreach_begin_index_ref(def, _def_index, scope, struct gsx_definition);
+	da_foreach_begin_index_ref(scope, _i, &vm->scopes, struct dynamic_array);
+		da_foreach_begin_index_ref(def, _j, scope, struct gsx_definition);
 			gsx_definition_free(def);
 		da_foreach_end();
 	da_foreach_end();
+	da_free(&vm->scopes);
 	gsx_free_definitions(&vm->definitions);
 	da_foreach_begin_ref(tmpl, &vm->templates, struct gsx_template);
 		gsx_destroy_template(tmpl);
@@ -2494,231 +2727,6 @@ bool						gsx_vm_run(struct gsx_virtual_machine* vm) {
 
 	if (vm->template_entry == NULL) return (true);
 	return (gsx_vm_run_template(vm, vm->template_entry));
-}
-
-/*	GSX_Print_Format	*/
-
-void	_gsx_print_writer_token_kind(int fd, enum gsx_token_kind kind) {
-	switch (kind) {
-		case GSX_TOKEN_INTEGER: _print_writer_cstr(fd, "integer"); break ;
-		case GSX_TOKEN_STRING: _print_writer_cstr(fd, "string"); break ;
-		case GSX_TOKEN_INVALID: _print_writer_cstr(fd, "invalid"); break ;
-		case GSX_TOKEN_IDENT: _print_writer_cstr(fd, "identifier"); break ;
-		case GSX_TOKEN_CALL: _print_writer_cstr(fd, "function call"); break ;
-		case GSX_TOKEN_CHAR: _print_writer_cstr(fd, "character"); break ;
-		case GSX_TOKEN_SQUARE_OPEN: _print_writer_cstr(fd, "array open"); break ;
-		case GSX_TOKEN_SQUARE_CLOSE: _print_writer_cstr(fd, "array close"); break ;
-		case GSX_TOKEN_PAREN_OPEN: _print_writer_cstr(fd, "parameters open"); break ;
-		case GSX_TOKEN_PAREN_CLOSE: _print_writer_cstr(fd, "parameters close"); break ;
-		case GSX_TOKEN_COMMA: _print_writer_cstr(fd, "comma"); break ;
-		case GSX_TOKEN_COLON: _print_writer_cstr(fd, "colon"); break ;
-		case GSX_TOKEN_HTML_OPEN: _print_writer_cstr(fd, "html open"); break ;
-		case GSX_TOKEN_HTML_CLOSE: _print_writer_cstr(fd, "html close"); break ;
-		case GSX_TOKEN_HTML_SIGNATURE: _print_writer_cstr(fd, "html gsx signature"); break ;
-		default: {
-			_print_writer_cstr(fd, "unreachable (");
-			_print_writer_long(fd, (long)kind);
-			_print_writer_char(fd, ')');
-		} break ;
-	}
-}
-
-void	_gsx_print_writer_token(int fd, struct gsx_token token) {
-	_print_writer_cstr(fd, "{ token ");
-	_print_writer_view_alt(fd, token.text);
-	_print_writer_char(fd, ' ');
-	_gsx_print_writer_token_kind(fd, token.kind);
-	_print_writer_cstr(fd, " }");
-}
-
-void	_gsx_print_writer_ast(int fd, struct gsx_ast* node, unsigned indent) {
-	if (node == NULL) {
-		if (indent == 0u) _print_writer_cstr(fd, "(ast::null)");
-		return ;
-	}
-
-	for (unsigned i = 0u; i < indent; ++i) print(fd, "\t");
-	switch (node->kind) {
-		case GSX_AST_LIST: {
-			struct gsx_ast_list*	list = node->data.list;
-			_print_writer_cstr(fd, "- list with ");
-			_print_writer_ulong(fd, list->elems.len);
-			_print_writer_cstr(fd, " elements");
-		} break ;
-		case GSX_AST_CALL: {
-			struct gsx_ast_call*	call = node->data.call;
-			_print_writer_cstr(fd, "- call ");
-			_gsx_print_writer_token(fd, call->name);
-			_print_writer_char(fd, '\n');
-			da_foreach_begin(node, &call->args, struct gsx_ast*);
-				_gsx_print_writer_ast(fd, node, indent + 1);
-			da_foreach_end();
-		} break ;
-		case GSX_AST_DEFINE: {
-			struct gsx_ast_define*	define = node->data.define;
-			_print_writer_cstr(fd, "- define ");
-			_gsx_print_writer_token(fd, define->name);
-		} break ;
-		case GSX_AST_LITERAL: {
-			struct gsx_ast_literal*	literal = node->data.literal;
-			_print_writer_cstr(fd, "- literal ");
-			_gsx_print_writer_token(fd, literal->token);
-		} break ;
-		case GSX_AST_IDENT: {
-			struct gsx_ast_ident*	ident = node->data.ident;
-			_print_writer_cstr(fd, "- identifier ");
-			_gsx_print_writer_token(fd, ident->name);
-		} break ;
-		case GSX_AST_INVALID: {
-			_print_writer_cstr(fd, "- invalid");
-		} break ;
-		default: {
-			_print_writer_cstr(fd, "- unreachable");
-		} break ;
-	}
-}
-
-void	_gsx_print_writer_ast_alt(int fd, struct gsx_ast* node) {
-	if (node == NULL) {
-		_print_writer_cstr(fd, "{ ast null }");
-		return ;
-	}
-
-	switch (node->kind) {
-		case GSX_AST_LIST: {
-			struct gsx_ast_list*	list = node->data.list;
-
-			_print_writer_cstr(fd, "{ ast ");
-			_print_writer_ulong(fd, list->elems.len);
-			_print_writer_cstr(fd, " elements list }");
-		} break ;
-		case GSX_AST_CALL: {
-			struct gsx_ast_call*	call = node->data.call;
-
-			_print_writer_cstr(fd, "{ call ");
-			_print_writer_view_alt(fd, call->name.text);
-			_print_writer_cstr(fd, " with ");
-			_print_writer_ulong(fd, call->args.len);
-			_print_writer_cstr(fd, " arguments }");
-		} break ;
-		case GSX_AST_DEFINE: {
-			struct gsx_ast_define*	define = node->data.define;
-
-			_print_writer_cstr(fd, "{ define ");
-			_print_writer_view_alt(fd, define->name.text);
-			_print_writer_cstr(fd, define->is_function ? " as a function that accepts " : " as a constant ");
-			if (define->is_function) {
-				_print_writer_ulong(fd, define->params.len);
-				_print_writer_cstr(fd, " parameters via ");
-			} else _print_writer_cstr(fd, "via ");
-			_gsx_print_writer_ast_alt(fd, define->value);
-			_print_writer_cstr(fd, " }");
-		} break ;
-		case GSX_AST_LITERAL: {
-			struct gsx_ast_literal*	literal = node->data.literal;
-
-			_print_writer_cstr(fd, "{ literal ");
-			_print_writer_view_alt(fd, literal->token.text);
-			_print_writer_cstr(fd, " }");
-		} break ;
-		case GSX_AST_IDENT: {
-			struct gsx_ast_ident*	ident = node->data.ident;
-
-			_print_writer_cstr(fd, "{ identifier ");
-			_print_writer_view_alt(fd, ident->name.text);
-			_print_writer_cstr(fd, " }");
-		} break ;
-		case GSX_AST_INVALID: {
-			_print_writer_cstr(fd, "{ invalid ");
-			_print_writer_addr(fd, (unsigned long)node);
-			_print_writer_cstr(fd, " }");
-		} break ;
-		default: {
-			_print_writer_cstr(fd, "{ unreachable }");
-		} break ;
-	}
-}
-
-void	_gsx_print_writer_type(int fd, enum gsx_type type) {
-	switch (type) {
-		case GSX_TYPE_CHAR: _print_writer_cstr(fd, "char"); break ;
-		case GSX_TYPE_INTEGER: _print_writer_cstr(fd, "integer"); break ;
-		case GSX_TYPE_STRING: _print_writer_cstr(fd, "string"); break ;
-		case GSX_TYPE_ARRAY: _print_writer_cstr(fd, "array"); break ;
-		case GSX_TYPE_VOID: _print_writer_cstr(fd, "void"); break ;
-		case GSX_TYPE_INVALID: _print_writer_cstr(fd, "invalid"); break ;
-		default: _print_writer_cstr(fd, "unreachable"); break ;
-	}
-}
-
-void	_gsx_print_writer_definition_kind(int fd, enum gsx_definition_kind kind) {
-	switch (kind) {
-		case GSX_DEFINITION_CONSTANT: _print_writer_cstr(fd, "user constant"); break ;
-		case GSX_DEFINITION_FUNCTION: _print_writer_cstr(fd, "user function"); break ;
-		case GSX_DEFINITION_INTERNAL_CONSTANT: _print_writer_cstr(fd, "internal constant"); break ;
-		case GSX_DEFINITION_INTERNAL_FUNCTION: _print_writer_cstr(fd, "internal function"); break ;
-		case GSX_DEFINITION_INVALID: _print_writer_cstr(fd, "invalid"); break ;
-		default: _print_writer_cstr(fd, "unreachable"); break ;
-	}
-}
-
-void	_gsx_print_writer_ast_param_kind(int fd, enum gsx_ast_param_kind kind) {
-	switch (kind) {
-		case GSX_PARAM_DESTRUCTURE: _print_writer_cstr(fd, "destructure"); break ;
-		case GSX_PARAM_IDENT: _print_writer_cstr(fd, "identifier"); break ;
-		case GSX_PARAM_LITERAL: _print_writer_cstr(fd, "literal"); break ;
-		case GSX_PARAM_INVALID: _print_writer_cstr(fd, "invalid"); break ;
-		default: _print_writer_cstr(fd, "unreachable"); break ;
-	}
-}
-
-void	gsx_print_writer_token_kind(int fd, va_list args) {
-	enum gsx_token_kind	kind = va_arg(args, enum gsx_token_kind);
-	_gsx_print_writer_token_kind(fd, kind);
-}
-
-void	gsx_print_writer_token(int fd, va_list args) {
-	struct gsx_token	token = va_arg(args, struct gsx_token);
-	_gsx_print_writer_token(fd, token);
-}
-
-void	gsx_print_writer_ast(int fd, va_list args) {
-	struct gsx_ast*	node = va_arg(args, struct gsx_ast*);
-	_gsx_print_writer_ast(fd, node, 0u);
-}
-
-void	gsx_print_writer_ast_alt(int fd, va_list args) {
-	struct gsx_ast*	node = va_arg(args, struct gsx_ast*);
-	_gsx_print_writer_ast_alt(fd, node);
-}
-
-void	gsx_print_writer_type(int fd, va_list args) {
-	enum gsx_type	type = va_arg(args, enum gsx_type);
-	_gsx_print_writer_type(fd, type);
-}
-
-void	gsx_print_writer_definition_kind(int fd, va_list args) {
-	enum gsx_definition_kind	kind = va_arg(args, enum gsx_definition_kind);
-	_gsx_print_writer_definition_kind(fd, kind);
-}
-
-void	gsx_print_writer_ast_param_kind(int fd, va_list args) {
-	enum gsx_ast_param_kind	kind = va_arg(args, enum gsx_ast_param_kind);
-	_gsx_print_writer_ast_param_kind(fd, kind);
-}
-
-void	print_registery_init_gsx(void) {
-	static bool	gsx_print_init = false;
-	if (gsx_print_init) return ;
-
-	gsx_print_init = true;
-	print_definition_add(view_make_cstr_const("gsx_ast"), gsx_print_writer_ast);
-	print_definition_add(view_make_cstr_const("#gsx_ast"), gsx_print_writer_ast_alt);
-	print_definition_add(view_make_cstr_const("gsx_ast_param_kind"), gsx_print_writer_ast_param_kind);
-	print_definition_add(view_make_cstr_const("gsx_type"), gsx_print_writer_type);
-	print_definition_add(view_make_cstr_const("gsx_token"), gsx_print_writer_token);
-	print_definition_add(view_make_cstr_const("gsx_token_kind"), gsx_print_writer_token_kind);
-	print_definition_add(view_make_cstr_const("gsx_definition_kind"), gsx_print_writer_definition_kind);
 }
 
 /*	 Entry_Point	*/

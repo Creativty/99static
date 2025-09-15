@@ -1,4 +1,5 @@
-<!doctype html><!-- <!-- gsx: std/include! "methods.gsx" -->
+<!doctype html>
+<!-- _gsx: std/include! "methods.gsx" -->
 <html>
 	<head>
 		<title><!-- gsx: std/TITLE --></title>
